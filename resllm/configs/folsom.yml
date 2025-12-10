@@ -1,0 +1,19 @@
+# config details
+config_name: "folsom_hist_forecast"
+
+# reservoir characterstics
+folsom_reservoir:
+  operable_storage_max: 975 # taf
+  operable_storage_min: 90 # taf
+  max_safe_release: 130000 # cfs
+  # storage volume to elevation relationship (TAF to ft)
+  sp_to_ep: [[0, 48, 93, 142, 192, 240, 288, 386, 678, 977],
+             [210, 305, 332, 351, 365, 376, 385, 401, 437, 466]]
+  # day of water year to top of conservation storage (TAF)
+  # based on the Folsom Dam flood control rule curves as found in http://www.hec.usace.army.mil/publications/ResearchDocuments/RD-48.pdf
+  tp_to_tocs: [[0, 50, 151, 200, 243, 366],
+               [975, 400, 400, 750, 975, 975]]
+  # storage to release relationship (TAF to cfs)
+  # based on th Folsom Dam flood control rule curves as found in http://www.usbr.gov/mp/cvp//cvp-cas/docs/Draft_Findings/130814_tech_memo_flood_control_purpose_hydrology_methods_results.pdf
+  sp_to_rp: [[90, 100, 400, 600, 975],
+             [0, 35000, 40000, 115000, 130000]]
