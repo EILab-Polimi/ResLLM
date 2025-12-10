@@ -1,3 +1,17 @@
+# custom
+_scratch/
+_archive/
+archive/
+output/
+analysis/
+*.code-workspace
+*.vscode
+*.idea
+*.iml
+*.DS_Store
+*.log
+*.db
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

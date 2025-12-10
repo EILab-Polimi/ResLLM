@@ -1,0 +1,21 @@
+# Core scientific computing
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Configuration files
+pyyaml>=6.0
+
+# LLM agent framework
+# agno provides Agent, RunOutput, SqliteDb, and model integrations
+agno
+
+# Data validation and type checking
+pydantic>=2.0.0
+typing-extensions>=4.5.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# API clients (required even though agno has wrappers)
+openai>=1.0.0
+google-genai>=1.0.0
