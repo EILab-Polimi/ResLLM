@@ -1,0 +1,22 @@
+name: res-llm
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13.11
+  - pip
+  - pip:
+      - numpy==2.4.1
+      - pandas==3.0.0
+      - scipy==1.17.0
+      - pyyaml==6.0.2
+      - agno==2.4.3
+      - pydantic==2.11.7
+      - typing-extensions==4.15.0
+      - python-dotenv==1.1.1
+      - openai==2.15.0
+      - google-genai==1.52.0
+      - mistralai==1.10.1
+      - ollama==0.6.1
+      - matplotlib==3.10.8
+      - scikit-learn==1.8.0
+      - joblib==1.5.3

@@ -37,12 +37,12 @@ class Reservoir:
 
         self.tocs = characteristics["tocs"]
         self.demand = np.loadtxt(characteristics["demand_file"]) # demand, TAF
-        print(f"Demand data loaded: {characteristics["demand_file"]}")
+        print(f"Demand data loaded: {characteristics['demand_file']}")
         self.inflows = pd.read_csv(characteristics["inflow_file"])  # inflow, TAF
         if characteristics["wy_forecast_file"] is not False:
             self.forecasted_inflows = pd.read_csv(characteristics["wy_forecast_file"])  # forecasted inflows, TAF
             self.forecasted_inflows["date"] = pd.to_datetime(self.forecasted_inflows["date"])
-            print(f"Forecasted inflows data loaded: {characteristics["wy_forecast_file"]}")
+            print(f"Forecasted inflows data loaded: {characteristics['wy_forecast_file']}")
 
         # apply date metadata to inflow data
         self.inflows["date"] = pd.to_datetime(self.inflows["date"])
@@ -65,7 +65,7 @@ class Reservoir:
             self.inflows["year"],
         )
         self.inflows["date"] = self.inflows["date"].dt.strftime("%Y-%m-%d")
-        print(f"Inflow data loaded: {characteristics["inflow_file"]}")
+        print(f"Inflow data loaded: {characteristics['inflow_file']}")
 
         self.characteristics = characteristics
         self.characteristics["average_water_year_total_demand"] = int(self.demand.sum())

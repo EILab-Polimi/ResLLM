@@ -118,8 +118,14 @@ def main():
 
         # Setup output filenames
         safe_model_name = model.replace(":", "-")
-        simulation_output_file = f"./output/{safe_model_name}_simulation_output_n{n}.csv"
-        decision_output_file = f"./output/{safe_model_name}_decision_output_n{n}.csv"
+        output_dir = os.path.join(file_dir, "output")
+        os.makedirs(output_dir, exist_ok=True)
+        simulation_output_file = os.path.join(
+            output_dir, f"{safe_model_name}_simulation_output_n{n}.csv"
+        )
+        decision_output_file = os.path.join(
+            output_dir, f"{safe_model_name}_decision_output_n{n}.csv"
+        )
 
         # period of record loop
         for wy in np.arange(start_wy, end_wy + 1):
@@ -154,12 +160,17 @@ def main():
                 uu = dt * allocation_percent / 100.0
 
                 # inflow
-                qt = R1.inflows.loc[
+                inflow_rows = R1.inflows.loc[
                     (R1.inflows["water_year"] == wy)
                     & (R1.inflows["month"] == d.month)
                     & (R1.inflows["day"] == d.day),
                     "inflow",
-                ].values[0]
+                ]
+                if inflow_rows.empty:
+                    raise ValueError(
+                        f"Missing inflow for date={d.strftime('%Y-%m-%d')} (WY={wy})"
+                    )
+                qt = float(inflow_rows.iloc[0])
 
                 # TOCS and evaluate
                 tocs = R1.compute_tocs(dowy=ty + 1, date=d.strftime("%Y-%m-%d"))

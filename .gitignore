@@ -4,6 +4,7 @@ _archive/
 archive/
 output/
 analysis/
+*_local*
 *.code-workspace
 *.vscode
 *.idea
