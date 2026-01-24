@@ -54,8 +54,12 @@ def main():
         else:   
             model_kwargs = {
                 "api_key": os.getenv("OPENAI_API_KEY"),
-                "reasoning": {"effort": args.reasoning_effort},
-        }
+                "temperature": args.temperature,
+                "reasoning": {
+                    "effort": args.reasoning_effort,
+                    "summary": "detailed",
+                },
+            }
     elif model_server == "xAI":
         model_kwargs = {
             "api_key": os.getenv("XAI_API_KEY"),
@@ -100,6 +104,7 @@ def main():
         include_double_check=args.include_double_check,
         include_num_history=args.include_num_history,
         include_red_herring=args.include_red_herring,
+        debug_response=args.debug_response,
     )
 
     # --- SIMULATION --- #
@@ -196,8 +201,10 @@ def main():
                         header=not os.path.exists(simulation_output_file)
                     )
                     if args.model != "release-demand":
-                        R1_agent.record.loc[month_start_idx:t].dropna().to_csv(
-                            decision_output_file, quotechar='"', index=False, mode='a', 
+                        R1_agent.record.loc[month_start_idx:t].dropna(
+                            subset=["allocation_percent"]
+                        ).to_csv(
+                            decision_output_file, quotechar='"', index=False, mode='a',
                             header=not os.path.exists(decision_output_file)
                         )
 
@@ -301,6 +308,12 @@ def parse_args():
         default=True,
         action="store_true",
         help="Include red herring in the context (Default: True).",
+    )
+    parser.add_argument(
+        "--debug-response",
+        default=False,
+        action="store_true",
+        help="Capture raw model response payloads for inspection (Default: False).",
     )
 
     return parser.parse_args()
