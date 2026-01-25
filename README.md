@@ -1,53 +1,121 @@
 # ResLLM
-ResLLM is a Python-based library for simulating water system management with large language models (LLMs).
 
-![llm reservoir](llm-reservoir.svg)
-*An LLM-generated SVG diagram translating a text prompt about water infrastructure into a complete visual system from mountain watershed to downstream distribution.*
+ResLLM is a Python library for simulating water reservoir management with large language models (LLMs).
 
-## Overview
-- LLM-driven water allocation decisions
-- Physics-based reservoir simulation with flood control and conservation constraints
-- Probabilistic inflow forecasting integration
-- Detailed logging of decisions, justifications, and concept importance rankings
+## How It Works
+
+ResLLM couples a **physical reservoir simulation** with an **LLM-based decision agent**. The simulation runs at a daily time step, but the LLM makes **monthly allocation decisions** that determine what fraction of downstream water demand to release.
+
+### Simulation Flow
+
+```
+Daily Loop (t = 1 to T)
+│
+├─> Read Inflow Q(t) from data
+│
+├─> Compute Reservoir Mass Balance:  S(t) = S(t-1) + Q(t) - R(t)
+│
+├─> If first day of month:
+│   │
+│   ├─> Query LLM Decision Agent
+│   │   │
+│   │   Inputs (current snapshot only):
+│   │   • Current storage S(t)
+│   │   • Cumulative inflow to date
+│   │   • Remaining demand for water year
+│   │   • Probabilistic forecasts (if provided)
+│   │   • Operational constraints (from config)
+│   │
+│   │   Outputs:
+│   │   • Allocation % (0-100)
+│   │   • Justification text
+│   │   • Concept importance rankings
+│   │
+│   └─> Set allocation for the month
+│
+├─> Compute Release:  R(t) = demand(t) × allocation%
+│   (constrained by TOCS, max safe release, and capacity)
+│
+└─> Advance to next day: t = t + 1
+    (loop back to top)
+
+Note: The LLM agent is stateless — it receives only the current state 
+and forecast, not previous decisions or historical simulation outputs.
+```
+
+### The Allocation Decision
+
+Each month, the LLM receives a prompt containing:
+
+1. **System context** — Role as a reservoir operator, goal to minimize shortages, climate characteristics
+2. **Operational constraints** — Max/min storage, average seasonal inflow and demand patterns (all derived from config and input data)
+3. **Current observations** — Storage level, cumulative inflow, remaining demand
+4. **Forecasts** (optional) — Probabilistic water year inflow projections (mean, 10th, 90th percentiles)
+5. **Red herring** (optional) — Irrelevant information to test model focus
+
+By default, the agent sees only the current state snapshot, not its previous decisions or the simulation's historical outputs.
+
+The LLM responds with a structured JSON containing:
+- **allocation_percent** — Fraction of demand to release (0–100%)
+- **allocation_reasoning** — Natural language justification
+- **allocation_concept_importance** — Rankings of which inputs influenced the decision
+
+### Physics-Based Reservoir Model
+
+The `Reservoir` class handles daily mass balance:
+
+```
+Storage(t) = Storage(t-1) + Inflow(t) - Release(t)
+```
+
+Release is constrained by:
+- **Top of Conservation Storage (TOCS)** — Flood control curve that forces releases when storage exceeds seasonal limits
+- **Max safe release** — Physical outlet capacity based on storage-elevation relationship
+- **Spill** — Uncontrolled overflow when storage exceeds capacity
+
+---
+
+## Project Structure
+
+```
+ResLLM/
+├── resllm/
+│   ├── simulate.py          # Main entry point
+│   ├── configs/             # Reservoir configuration YAML files
+│   ├── output/              # Simulation results
+│   ├── batch/               # OpenAI Batch API tools for ablation studies
+│   └── src/
+│       ├── reservoir.py     # Reservoir class (mass balance, TOCS, constraints)
+│       ├── operator.py      # ReservoirAllocationOperator (LLM agent)
+│       └── utils.py         # Unit conversions, date utilities
+├── data/
+│   ├── demand.txt           # 365-day demand series (TAF)
+│   ├── folsom_daily.csv     # Historical inflow (date, inflow)
+│   └── FOLC1_wy_hindcast.csv# Probabilistic forecasts (optional)
+└── benchmarks/
+    ├── dp/                  # Dynamic programming (DDP/SDP) baselines
+    └── nn/                  # MLP neural network baseline
+```
+
+---
 
 ## Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/wyattarnold/ResLLM.git
 cd ResLLM
-
-# Install dependencies
 pip install -r requirements.txt
 
-# Set up environment variables for API keys
+# For cloud APIs, create a .env file
 cp .env.example .env
-# Edit .env and add your API keys:
-# OPENAI_API_KEY=your_key_here
-# GOOGLE_API_KEY=your_key_here
-# XAI_API_KEY=your_key_here
+# Add your keys: OPENAI_API_KEY, OLLAMA_API_KEY
 ```
 
-## Quick Start
-
-Run a historical simulation using OpenAI's o4-mini model:
-
-```bash
-cd resllm
-python simulate.py \
-  --model-server OpenAI \
-  --model o4-mini-2025-04-16 \
-  --config folsom_hist.yml \
-  --start-year 1996 \
-  --end-year 2016 \
-  --starting-storage 466.1
-```
-
-This simulates reservoir operations from 1996-2016 using historical inflow data from California's Folsom Reservoir.
+---
 
 ## Usage
 
-### Basic Command Structure
+### Command Structure
 
 ```bash
 python simulate.py \
@@ -56,223 +124,149 @@ python simulate.py \
   --config <CONFIG_FILE> \
   --start-year <YYYY> \
   --end-year <YYYY> \
-  --starting-storage <TAF>
+  --starting-storage <TAF> \
+  [optional flags]
 ```
 
 ### Required Arguments
 
-| Argument | Description | Example |
-|----------|-------------|---------|
-| `--config` | Configuration YAML file (in `configs/`) | `folsom_hist.yml` |
-| `--start-year` | First water year to simulate | `1996` |
-| `--end-year` | Last water year to simulate | `2016` |
-| `--starting-storage` | Initial reservoir storage (TAF) | `466.1` |
-| `--model-server` | LLM provider | `OpenAI`, `Ollama`, `Google`, `xAI` |
-| `--model` | Model identifier | `o4-mini-2025-04-16`, `gpt-oss:120b` |
+| Argument | Description |
+|----------|-------------|
+| `--model-server` | LLM provider: (e.g., `Ollama`, `OpenAI`) |
+| `--model` | Model identifier (e.g., `kimi-k2-thinking:cloud`, `o4-mini-2025-04-16`) |
+| `--config` | Configuration YAML in `configs/` (e.g., `folsom.yml`) |
+| `--start-year` | First water year (October–September) |
+| `--end-year` | Last water year |
+| `--starting-storage` | Initial reservoir storage in TAF |
 
 ### Optional Arguments
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--nsample` | `1` | Number of simulation replications |
-| `--temperature` | `0.1` | Sampling temperature for LLM |
-| `--fix-tocs` | `False` | Use fixed TOCS instead of adaptive |
-| `--include-double-check` | `False` | Enable decision verification step |
+| `--nsample` | `1` | Number of replicate simulations |
+| `--temperature` | `1.0` | Sampling temperature |
+| `--tocs` | `fixed` | TOCS mode: `fixed` (seasonal curve) or `historical` (max of curve and observed) |
+| `--wy-forecast-file` | `None` | Probabilistic forecast file (enables forecast context) |
+| `--reasoning-effort` | `high` | Reasoning level for supported models |
+| `--include-double-check` | `False` | Ask model to verify its decision |
 | `--include-num-history` | `0` | Number of past decisions to include in context |
-| `--include-red-herring` | `True` | Include irrelevant information test |
+| `--include-red-herring` | `True` | Include irrelevant text to test focus |
+| `--debug-response` | `False` | Save raw model responses for inspection |
 
 ### Example Commands
 
-**Historical scenario with forecast data:**
+**Full historical period with forecasts (OpenAI):**
 ```bash
 python simulate.py \
   --model-server OpenAI \
   --model o4-mini-2025-04-16 \
-  --config folsom_hist_forecast.yml \
-  --start-year 1996 \
-  --end-year 2016 \
-  --starting-storage 466.1
-```
-
-**Multiple samples:**
-```bash
-python simulate.py \
-  --model-server OpenAI \
-  --model o4-mini-2025-04-16 \
-  --config folsom_hist_forecast.yml \
+  --config folsom.yml \
   --start-year 1996 \
   --end-year 2016 \
   --starting-storage 466.1 \
-  --nsample 20
+  --tocs historical \
+  --wy-forecast-file FOLC1_wy_hindcast.csv
 ```
 
-**Local model using Ollama:**
-```bash
-python simulate.py \
-  --model-server Ollama \
-  --model gpt-oss:120b \
-  --config folsom_hist.yml \
-  --start-year 1996 \
-  --end-year 2016 \
-  --starting-storage 466.1 \
-  --temperature 0.1
-```
-
-## Configuration Files
-
-Configuration files define reservoir characteristics, data sources, and operational constraints. They are stored in `resllm/configs/` and use YAML format.
-
-### Example Configuration
-
-```yaml
-config_name: "folsom_hist"
-
-folsom_reservoir:
-  operable_storage_max: 975  # TAF
-  operable_storage_min: 90   # TAF
-  max_safe_release: 130000   # cfs
-  
-  # Storage-elevation relationship (TAF to ft)
-  sp_to_ep: [[0, 48, 93, ...], [210, 305, 332, ...]]
-  
-  # Day of water year to TOCS (TAF)
-  tp_to_tocs: [[0, 50, 151, ...], [975, 400, 400, ...]]
-  
-  # Storage to max release (TAF to cfs)
-  sp_to_rp: [[90, 100, 400, ...], [0, 35000, 40000, ...]]
-```
-
-## Output Files
-
-Simulations produce two CSV files per sample in `resllm/output/<experiment_name>/`:
-
-### 1. Simulation Output
-`<model>_simulation_output_n<sample>.csv`
-
-Daily time series with columns:
-- `date`, `wy`, `mowy`, `dowy` - Temporal identifiers
-- `qt` - Inflow (TAF)
-- `st` - Storage (TAF)
-- `rt` - Release (TAF)
-- `dt` - Downstream demand (TAF)
-- `uu` - Target release based on allocation (TAF)
-
-### 2. Decision Output
-`<model>_decision_output_n<sample>.csv`
-
-Monthly allocation decisions with columns:
-- `date`, `wy`, `mowy`, `dowy` - When decision was made
-- `qwyaccum` - Cumulative water year inflow (TAF)
-- `d_wy_rem` - Remaining water year demand (TAF)
-- `st_1` - Current storage (TAF)
-- `observation` - Full prompt sent to LLM
-- `allocation_percent` - Decision (0-100%)
-- `allocation_justification` - LLM's reasoning
-- Concept importance rankings (e.g., `current_storage`, `goal`, etc.)
-
-## Architecture
-
-### Core Components
-
-**`src/reservoir.py`**
-- `Reservoir` class: Physics-based reservoir model
-- Handles mass balance: storage = previous storage + inflow - release
-- Implements flood control rules (TOCS constraints)
-- Computes safety releases based on storage-elevation curves
-
-**`src/operator.py`**
-- `ReservoirAllocationOperator` class: LLM agent wrapper
-- Constructs decision prompts with operational context
-- Manages multi-turn conversations with history
-- Parses structured decisions using Pydantic models
-- Supports multiple LLM providers via agno framework
-
-**`src/utils.py`**
-- Unit conversions (CFS ↔ TAF)
-- Water year date calculations
-- Decision post-processing utilities
-
-**`simulate.py`**
-- Main simulation orchestrator
-- Daily time-stepping loop
-- Monthly decision points
-- Output file management
-
-### Decision-Making Process
-
-Each month, the LLM operator receives:
-
-1. **Current State**
-   - Storage level (TAF)
-   - Cumulative inflow to date
-   - Remaining demand for the water year
-
-2. **Historical Context**
-   - Previous allocation decisions
-   - Past observations
-
-3. **Forecasts** (if available)
-   - Probabilistic inflow projections
-   - Mean, 10th, and 90th percentile scenarios
-
-4. **Operational Constraints**
-   - Max/min storage levels
-   - Average seasonal demand patterns
-   - Average seasonal inflow patterns
-
-The LLM responds with:
-- Allocation percentage (0-100%)
-- Justification for the decision
-- Importance ranking of decision factors
+---
 
 ## Supported LLM Providers
 
-### OpenAI
-```bash
-export OPENAI_API_KEY=your_key
-python simulate.py --model-server OpenAI --model o4-mini-2025-04-16 ...
+| Provider | Server | Model | Notes |
+|----------|-------------|---------------|-------|
+| **Ollama** | `Ollama` | `kimi-k2-thinking:cloud` | Local or cloud; supports thinking trace capture |
+| **OpenAI** | `OpenAI` | `o4-mini-2025-04-16` | Requires `OPENAI_API_KEY` |
+| **Google** | `Google` | `gemini-2.5-pro` | Requires `GOOGLE_API_KEY` |
+| **xAI** | `xAI` | `grok-4-0709` | Requires `XAI_API_KEY` |
+| **Mistral** | `Mistral` | `mistral-large-2512` | Requires `MISTRAL_API_KEY` |
+
+---
+
+## Output Files
+
+Simulations write to [resllm/output](resllm/output):
+
+### Simulation Output (`<model>_simulation_output_n<N>.csv`)
+
+Daily time series:
+
+| Column | Description |
+|--------|-------------|
+| `date` | Calendar date |
+| `wy` | Water year |
+| `mowy` | Month of water year (1–12) |
+| `dowy` | Day of water year (1–365) |
+| `qt` | Inflow (TAF) |
+| `st` | End-of-day storage (TAF) |
+| `rt` | Release (TAF) |
+| `dt` | Downstream demand (TAF) |
+| `uu` | Target release = demand × allocation% |
+
+### Decision Output (`<model>_decision_output_n<N>.csv`)
+
+Monthly decisions:
+
+| Column | Description |
+|--------|-------------|
+| `date`, `wy`, `mowy`, `dowy` | When the decision was made |
+| `qwyaccum` | Cumulative water year inflow (TAF) |
+| `d_wy_rem` | Remaining demand for the water year (TAF) |
+| `st_1` | Storage at decision time (TAF) |
+| `allocation_percent` | Decision (0–100%) |
+| `allocation_justification` | LLM's reasoning |
+| `model_reasoning` | Extended thinking trace (if available) |
+| `observation` | Full prompt sent to LLM |
+| Concept importance columns | Rankings for each input factor |
+
+---
+
+## Configuration Files
+
+Configuration YAML files in [resllm/configs](resllm/configs) define reservoir characteristics. The config determines all operational constraints that the LLM sees in its prompt:
+
+```yaml
+config_name: "my_reservoir"
+
+folsom_reservoir:  # key name used by the code
+  operable_storage_max: 975   # TAF — upper storage limit
+  operable_storage_min: 90    # TAF — dead pool / min operating level
+  max_safe_release: 130000    # cfs — outlet capacity
+  
+  # Storage (TAF) to elevation (ft) — for level-based constraints
+  sp_to_ep: [[storage_points], [elevation_points]]
+  
+  # Day of water year to TOCS (TAF) — flood control curve
+  tp_to_tocs: [[day_points], [tocs_values]]
+  
+  # Storage (TAF) to max release (cfs) — release capacity curve
+  sp_to_rp: [[storage_points], [release_points]]
 ```
 
-### Ollama (Local)
-```bash
-# Start Ollama server, then:
-python simulate.py --model-server Ollama --model gpt-oss:120b --temperature 0.1 ...
-```
+To simulate a different reservoir, create a new config file and provide matching inflow/demand/forecast data.
 
-### Google Gemini
-```bash
-export GOOGLE_API_KEY=your_key
-python simulate.py --model-server Google --model gemini-2.5-pro ...
-```
+---
 
-### xAI
-```bash
-export XAI_API_KEY=your_key
-python simulate.py --model-server xAI --model grok-2 --temperature 0.1 ...
-```
+## Input Data Format
 
-## Data Requirements
+Input data files live in the `data/` directory. The simulation reads these based on CLI flags (`--inflow-file`, `--demand-file`, `--wy-forecast-file`).
 
-### Input Data Format
-
-**Inflow file** (`folsom_daily.csv`):
+**Inflow file** (daily inflows in TAF):
 ```csv
 date,inflow
-1996-10-01,0.5
-1996-10-02,0.6
+1995-10-01,0.5
+1995-10-02,0.6
 ...
 ```
 
-**Demand file** (`demand.txt`):
+**Demand file** (365 daily values in TAF, starting October 1):
 ```
 2.5
 2.5
 2.6
 ...
 ```
-(365 daily values in TAF)
 
-**Forecast file** (optional, `FOLC1_wy_hindcast.csv`):
+**Forecast file** (optional, probabilistic water year inflow):
 ```csv
 date,QCYFHM,QCYFH1,QCYFH9
 1996-01-01,500,300,700
@@ -281,4 +275,12 @@ date,QCYFHM,QCYFH1,QCYFH9
 - `QCYFHM`: Mean forecast
 - `QCYFH1`: 10th percentile
 - `QCYFH9`: 90th percentile
+
+The example data uses California's Folsom Reservoir, but you can substitute any reservoir by providing appropriate config and data files.
+
+---
+
+## License
+
+See [LICENSE](LICENSE).
 
