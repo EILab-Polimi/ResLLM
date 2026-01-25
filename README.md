@@ -127,17 +127,14 @@ python simulate.py \
   --starting-storage <TAF> \
   [optional flags]
 ```
-
-### Required Arguments
-
 | Argument | Description |
 |----------|-------------|
-| `--model-server` | LLM provider: (e.g., `Ollama`, `OpenAI`) |
+| `--model-server` | LLM provider (e.g., `Ollama`, `OpenAI`, `Google`) |
 | `--model` | Model identifier (e.g., `kimi-k2-thinking:cloud`, `o4-mini-2025-04-16`) |
 | `--config` | Configuration YAML in `configs/` (e.g., `folsom.yml`) |
 | `--start-year` | First water year (October–September) |
 | `--end-year` | Last water year |
-| `--starting-storage` | Initial reservoir storage in TAF |
+| `--starting-storage` | Initial storage (TAF) |
 
 ### Optional Arguments
 
@@ -153,7 +150,6 @@ python simulate.py \
 | `--include-red-herring` | `True` | Include irrelevant text to test focus |
 | `--debug-response` | `False` | Save raw model responses for inspection |
 
-### Example Commands
 
 **Full historical period with forecasts (OpenAI):**
 ```bash
@@ -167,6 +163,16 @@ python simulate.py \
   --tocs historical \
   --wy-forecast-file FOLC1_wy_hindcast.csv
 ```
+
+---
+
+## Reasoning traces (CoT) handling
+
+`model_reasoning` is populated differently per provider in [resllm/src/operator.py](resllm/src/operator.py):
+
+- Ollama: Uses the native Ollama chat stream (when `think` is enabled) to capture the model’s thinking text. This stream is stored as `model_reasoning`.
+- OpenAI: Uses the provider’s structured response; `model_reasoning` is set from the SDK’s `reasoning_content` when available.
+- Google (Gemini): Uses thought summaries (not signatures). `includeThoughts` is enabled in [resllm/simulate.py](resllm/simulate.py), and `model_reasoning` is extracted from response `parts` where `thought=True`.
 
 ---
 

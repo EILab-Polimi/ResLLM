@@ -397,6 +397,10 @@ class ReservoirAllocationOperator:
 
         # capture reasoning content if provided by agno
         self.last_reasoning = getattr(self.response, "reasoning_content", None)
+        if self.model_server == "Google":
+            gemini_thoughts = self._extract_gemini_thought_summary(self.response)
+            if gemini_thoughts:
+                self.last_reasoning = gemini_thoughts
 
         # optionally capture the raw response for inspection
         if self.debug_response:
@@ -593,6 +597,14 @@ class ReservoirAllocationOperator:
         """
         Best-effort serialization of RunOutput for debugging.
         """
+        try:
+            payload = self._response_to_serializable(response)
+            return json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            return str(response)
+
+    def _response_to_serializable(self, response: RunOutput):
+        """Convert a RunOutput to JSON-serializable structures."""
         def to_serializable(obj):
             if obj is None:
                 return None
@@ -608,8 +620,33 @@ class ReservoirAllocationOperator:
                 return to_serializable(obj.__dict__)
             return str(obj)
 
-        try:
-            payload = to_serializable(response)
-            return json.dumps(payload, ensure_ascii=False)
-        except Exception:
-            return str(response)
+        return to_serializable(response)
+
+    def _walk_payload(self, obj):
+        """Yield dict/list nodes from a nested payload structure."""
+        if isinstance(obj, dict):
+            yield obj
+            for v in obj.values():
+                yield from self._walk_payload(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                yield from self._walk_payload(item)
+
+    def _extract_gemini_thought_summary(self, response: RunOutput) -> Optional[str]:
+        """Extract Gemini thought summaries from response content parts."""
+        payload = self._response_to_serializable(response)
+        summaries = []
+        for node in self._walk_payload(payload):
+            parts = node.get("parts")
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                text = part.get("text")
+                thought_flag = part.get("thought")
+                if thought_flag and isinstance(text, str) and text.strip():
+                    summaries.append(text.strip())
+        if summaries:
+            return "\n".join(summaries)
+        return None

@@ -43,7 +43,8 @@ def main():
         model_kwargs = {
             "api_key": os.getenv("GOOGLE_API_KEY"),
             "temperature": args.temperature,
-            "thinking_level": args.reasoning_effort
+            "thinking_level": args.reasoning_effort,
+            "include_thoughts": True
         }
     elif model_server == "OpenAI":
         if args.reasoning_effort == "na":
@@ -288,7 +289,7 @@ def parse_args():
     parser.add_argument(
         "--temperature",
         type=float,
-        default=1.0,
+        default=None,
         help="Temperature for local models.",
     )
     parser.add_argument(
