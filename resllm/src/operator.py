@@ -18,6 +18,14 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from typing_extensions import TypedDict
 
+from resllm.src.prompts import (
+    build_system_message,
+    build_instructions,
+    build_observation,
+    DOUBLE_CHECK_PROMPT,
+    OLLAMA_JSON_INSTRUCTION,
+)
+
 
 
 class OperationalConcepts(TypedDict):
@@ -134,73 +142,10 @@ class ReservoirAllocationOperator:
             self.model = MistralChat(id=model_and_version[1], **model_kwargs)
 
         # - system message
-        self.system_message = ""
-        if "gpt-oss" in model_and_version[1]:
-            self.system_message += dedent(
-                """\
-                Reasoning: high
-                """
-            )
-
-        self.system_message += dedent(
-            """\
-            You are a water reservoir operator.
-            Your goal is to minimize shortages to downstream water supply by releasing water from the reservoir.
-            The reservoir is located in a region with a Mediterranean climate, characterized by hot, dry summers and highly variable wet winters.
-            The reservoir is operated to meet the municipal and agricultural water supply needs of the region while also maintaining flood control and environmental flow requirements.
-            The water year is defined as the period from October through September.
-            """
-        )
+        self.system_message = build_system_message(model_and_version[1])
 
         # - instruction message
-        self.instructions = dedent(
-            """\
-            - You are tasked with determining the percent allocation of water demand to release from the reservoir.
-            - At the beginning of each month, you will be asked to update the percent allocation decision based on your current observations.
-            - In your determination, consider the volume currently in storage, inflow to date compared to expected inflows, and the need to balance meeting current demands against conserving water for future demands.
-            - Note that a shortage is calculated by demand x (100 - percent allocation).
-            You have the following information about the reservoir:
-            - The maximum operable storage level is {} TAF.
-            - The minimum operable storage level is {} TAF.
-            """
-        ).format(
-            reservoir.characteristics["operable_storage_max"],
-            reservoir.characteristics["operable_storage_min"],
-        )
-
-        self.instructions += f"- The average total water year demand: {reservoir.characteristics['average_water_year_total_demand']}\n"
-
-        self.instructions += """- The average cumulative inflow by beginning of month of the water year: """
-        for month in range(12):
-            self.instructions += f"Month {month+1}: {reservoir.characteristics['average_cumulative_inflow_by_month'][month]} TAF | "
-        self.instructions += "\n"
-
-        self.instructions += """- The average remaining demand by beginning of month of the water year: """
-        for month in range(12):
-            self.instructions += f"Month {month+1}: {reservoir.characteristics['average_remaining_demand_by_month'][month]} TAF | "
-        self.instructions += "\n"
-
-        if self.reservoir.characteristics["wy_forecast_file"] is not False:
-            self.instructions += dedent(
-                """\
-                - You have access to a probabilistic forecast of inflows for the remainder of the water year.
-                - The probabilistic forecast includes the ensemble mean, and 10th and 90th percentile expected water year inflow.
-                - Use this forecast to inform your allocation decision.
-                """
-            )
-
-        if self.include_red_herring:
-            self.instructions += dedent(
-                """\
-                - Puppies like to play, explore their surroundings with boundless curiosity, and chew on just about everything they can get their teeth on. They also love to sleep deeply after their bursts of energy, often curling up in the coziest spots they can find.
-                """
-            )
-
-        self.instructions += dedent(
-            """\
-            - Assign an importance ranking ("very high"=1, "high"=2, "medium"=3, "low"=4, or "no importance"=0) to the reservoir management concepts supporting your decision.
-            """
-        )
+        self.instructions = build_instructions(reservoir, self.include_red_herring)
 
         # = response model
         self.response_model = AllocationDecision
@@ -274,66 +219,18 @@ class ReservoirAllocationOperator:
                     ].values[0]
                 )
 
-        # set the observation string
-        self.observation = dedent(
-            """\
-            It is the beginning of month {} of the water year.
-            """.format(
-                int(mowy) if mowy is not None else 0
-            )
-        )
-
-        # add the current state of the reservoir
-        if mowy > 1:
-            self.observation += dedent(
-                """\
-                    So far this water year, {} TAF of reservoir inflow has been observed.
-                """
-            ).format(int(qwyaccum) if qwyaccum is not None else 0)
-
-        # add the current state of the reservoir
-        self.observation += dedent(
-            """\
-            There is currently {} TAF in storage.
-            """
-        ).format(int(st_1) if st_1 is not None else 0)
-
-        # add forecasted inflows if available
-        if qwy_forecast_mean is not None:
-            self.observation += dedent(
-                """\
-                The probabilistic forecasted inflows for the remainder of the water year are:
-                - Mean (expected): {} TAF
-                - 10th percentile: {} TAF
-                - 90th percentile: {} TAF
-                """
-            ).format(
-                int(qwy_forecast_mean) if qwy_forecast_mean is not None else 0,
-                int(qwy_forecast_10) if qwy_forecast_10 is not None else 0,
-                int(qwy_forecast_90) if qwy_forecast_90 is not None else 0,
-            )
-
-        # add the remaining demand
-        self.observation += dedent(
-            """\
-            There is approximately {} TAF of water demand to meet over the remainder of the water year.
-            """
-        ).format(int(d_wy_rem) if d_wy_rem is not None else 0)
-        if mowy >= 9:
-            self.observation += dedent(
-                """\
-                Also, note that next water year is approaching and the first three months have a demand of {} TAF.
-                """
-            ).format(int(self.reservoir.demand[0:90].sum()))
-
-        # add the instruction to provide a percent allocation decision
-        self.observation += dedent(
-            """\
-            The previous percent allocation decision was {} percent.
-            Provide a percent allocation decision (from 0-100 percent) which continues or updates the allocation.
-            """
-        ).format(
-            int(alloc_1) if alloc_1 is not None else 0,
+        # set the observation string using the prompts module
+        next_wy_demand = int(self.reservoir.demand[0:90].sum()) if mowy >= 9 else None
+        self.observation = build_observation(
+            mowy=mowy,
+            st_1=st_1,
+            d_wy_rem=d_wy_rem,
+            alloc_1=alloc_1,
+            qwyaccum=qwyaccum,
+            qwy_forecast_mean=qwy_forecast_mean,
+            qwy_forecast_10=qwy_forecast_10,
+            qwy_forecast_90=qwy_forecast_90,
+            next_wy_demand=next_wy_demand,
         )
 
         # record the observation in the decision output
@@ -369,14 +266,7 @@ class ReservoirAllocationOperator:
                     raise Exception(f"{self.model.provider} API call failed after 3 attempts")
             
             if self.include_double_check:
-                self.check_answer = dedent(
-                    """\
-                    Double check your response and make sure you are confident in the percent allocation decision. Comment on any changes to your decision in the justification.
-                    """
-                )
-                self.response: RunOutput = self.agent.run(
-                    self.check_answer
-                )
+                self.response: RunOutput = self.agent.run(DOUBLE_CHECK_PROMPT)
                 content = self.response.content
 
         # get the decision output
@@ -435,17 +325,7 @@ class ReservoirAllocationOperator:
         """
         from ollama import chat
 
-        system_prompt = (
-            f"{self.system_message}{self.instructions}"
-            "\nRespond with valid JSON for the AllocationDecision schema."
-            "\nUse exact keys: allocation_reasoning, allocation_percent, allocation_concept_importance."
-            "\nThe allocation_concept_importance object MUST include these exact keys: "
-            "environment_setting, goal, operational_limits, average_cumulative_inflow_by_month, "
-            "average_remaining_demand_by_month, previous_allocation, current_month, current_storage, "
-            "current_cumulative_observed_inflow, current_water_year_remaining_demand, "
-            "next_water_year_demand, mean_forecast, percentile_forecast_10th, "
-            "percentile_forecast_90th, puppies."
-        )
+        system_prompt = f"{self.system_message}{self.instructions}{OLLAMA_JSON_INSTRUCTION}"
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": observation},
@@ -479,7 +359,7 @@ class ReservoirAllocationOperator:
         if self.include_double_check:
             messages += [
                 {"role": "assistant", "content": raw_text},
-                {"role": "user", "content": "Double check your response and make sure you are confident in the percent allocation decision. Comment on any changes to your decision in the justification."},
+                {"role": "user", "content": DOUBLE_CHECK_PROMPT.strip()},
             ]
             thinking_2, raw_text = stream_response(messages)
             if thinking_2:
