@@ -4,6 +4,7 @@ _archive/
 archive/
 output/
 analysis/
+arnold_et_al_2026/
 *_local*
 *.code-workspace
 *.vscode
