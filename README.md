@@ -127,6 +127,9 @@ python simulate.py \
   --starting-storage <TAF> \
   [optional flags]
 ```
+
+### Required Arguments
+
 | Argument | Description |
 |----------|-------------|
 | `--model-server` | LLM provider (e.g., `Ollama`, `OpenAI`, `Google`) |
@@ -150,6 +153,7 @@ python simulate.py \
 | `--include-red-herring` | `True` | Include irrelevant text to test focus |
 | `--debug-response` | `False` | Save raw model responses for inspection |
 
+### Example Commands
 
 **Full historical period with forecasts (OpenAI):**
 ```bash

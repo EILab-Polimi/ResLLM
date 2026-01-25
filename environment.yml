@@ -1,4 +1,4 @@
-name: res-llm
+name: resllm
 channels:
   - conda-forge
 dependencies:
