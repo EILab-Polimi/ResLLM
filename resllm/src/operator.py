@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from typing_extensions import TypedDict
 
-from resllm.src.prompts import (
+from src.prompts import (
     build_system_message,
     build_instructions,
     build_observation,
