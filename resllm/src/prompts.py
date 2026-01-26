@@ -115,7 +115,7 @@ DOUBLE_CHECK_PROMPT = dedent("""\
 OLLAMA_JSON_INSTRUCTION = (
     "\nRespond with valid JSON for the AllocationDecision schema."
     "\nUse exact keys: allocation_reasoning, allocation_percent, allocation_concept_importance."
-    "\nThe allocation_concept_importance object MUST include these exact keys: "
+    "\nThe allocation_concept_importance object MUST include these exact keys and the values MUST be integers: "
     "environment_setting, goal, operational_limits, average_cumulative_inflow_by_month, "
     "average_remaining_demand_by_month, previous_allocation, current_month, current_storage, "
     "current_cumulative_observed_inflow, current_water_year_remaining_demand, "
