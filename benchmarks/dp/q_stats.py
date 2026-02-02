@@ -49,7 +49,7 @@ def compute_lognormal_stats(
     verbose=False,
 ):
     """
-    Compute daily log-normal mean and std dev for inflow between start_date and end_date.
+    Compute daily log-normal mean, std dev, and lag-1 autocorrelation for inflow between start_date and end_date.
     Drops Feb‑29 and replaces zeros (<=0.001) with the previous value.
 
     Parameters
@@ -69,8 +69,8 @@ def compute_lognormal_stats(
 
     Returns
     -------
-    q_stat : ndarray, shape (T, 2)
-        Daily [mean(log inflow), std(log inflow)] for each day of the water year.
+    q_stat : ndarray, shape (T, 3)
+        Daily [mean(log inflow), std(log inflow), lag-1 autocorrelation] for each day of the water year.
     """
     # build date index and slice the dataframe
     date_range = pd.date_range(start_date, end_date, freq="D")
@@ -92,11 +92,28 @@ def compute_lognormal_stats(
     if verbose:
         print(f"Number of years: {Ny}")
     Q = q_clean.reshape(Ny, T).T
-    q_stat = np.empty((T, 2))
+    log_Q = np.log(Q)  # shape (T, Ny)
+    
+    q_stat = np.empty((T, 3))  # mean, std, lag-1 autocorrelation
     for i in range(T):
-        logs = np.log(Q[i, :])
+        logs = log_Q[i, :]
         q_stat[i, 0] = logs.mean()
         q_stat[i, 1] = logs.std()
+        
+        # lag-1 autocorrelation: correlation between day i and day i-1
+        # For day 0, use the last day of the previous water year (day T-1)
+        if i == 0:
+            logs_prev = log_Q[T - 1, :-1]  # last day of previous years
+            logs_curr = log_Q[i, 1:]       # first day of current years (shifted by 1 year)
+        else:
+            logs_prev = log_Q[i - 1, :]
+            logs_curr = log_Q[i, :]
+        
+        # compute Pearson correlation coefficient
+        if len(logs_prev) > 1 and logs_prev.std() > 0 and logs_curr.std() > 0:
+            q_stat[i, 2] = np.corrcoef(logs_prev, logs_curr)[0, 1]
+        else:
+            q_stat[i, 2] = 0.0
 
     return q_stat
 

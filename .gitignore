@@ -13,6 +13,7 @@ arnold_et_al_2026/
 *.DS_Store
 *.log
 *.db
+.claude/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

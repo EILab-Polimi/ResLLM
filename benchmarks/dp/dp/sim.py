@@ -207,7 +207,7 @@ def sim_lake(q, s0, policy, sys_param):
 
         elif name == "sdp":
             # -- load SDP algorithm
-            from dp.sdp import bellman_sdp
+            use_ar1 = sys_param["algorithm"].get("use_ar1", False)
 
             # grab discretizations & precomputed min/max tables
             discr_s = sys_param["algorithm"]["discr_s"]  # (n_s,)
@@ -220,7 +220,7 @@ def sim_lake(q, s0, policy, sys_param):
             wt = sys_param["simulation"]["w"][doy]
             sys_param["simulation"]["wt"] = wt
 
-            # set disturbance
+            # set disturbance stats
             sys_param["algorithm"]["stat_t"] = sys_param["algorithm"]["q_stat"][doy, :]
 
             # find index of nearest inflow bin
@@ -231,11 +231,40 @@ def sim_lake(q, s0, policy, sys_param):
             sys_param["simulation"]["vv"] = interp_lin_scalar(discr_s, vv_vals, s[t])
             sys_param["simulation"]["VV"] = interp_lin_scalar(discr_s, VV_vals, s[t])
 
-            # one‐step Bellman to get optimal decision indices
-            H_next = policy["H"][:, doy]
-            H_new, idx_u_list = bellman_sdp(H_next, s[t], sys_param)
+            if use_ar1:
+                from dp.sdp import bellman_sdp_ar1
 
-            # pick a single u via irrigation‐deficit tie‐breaker
+                discr_log_q = sys_param["algorithm"]["discr_log_q"]
+                doy_prev = (doy - 1) % T
+                sys_param["algorithm"]["stat_t_prev"] = sys_param["algorithm"]["q_stat"][doy_prev, :]
+
+                # get previous inflow (use starting value for t=0)
+                if t == 0:
+                    q_prev = q_sim[1]  # use first inflow as proxy
+                else:
+                    q_prev = q_sim[t]
+                log_q_prev = np.log(max(q_prev, 1e-6))
+
+                # For AR1, vv and VV need to be vectors over all q values
+                # Interpolate min/max release for current storage across all inflow bins
+                idx_s = np.argmin(np.abs(discr_s - s[t]))
+                sys_param["simulation"]["vv"] = min_rel[idx_s, :, doy]  # (n_q,)
+                sys_param["simulation"]["VV"] = max_rel[idx_s, :]  # (n_q,)
+
+                # H is now 3D: (n_s, n_log_q, T)
+                H_next_3d = policy["H"][:, :, doy]
+
+                H_new, idx_u_list = bellman_sdp_ar1(
+                    H_next_3d, s[t], log_q_prev, sys_param
+                )
+            else:
+                from dp.sdp import bellman_sdp
+
+                # one-step Bellman to get optimal decision indices
+                H_next = policy["H"][:, doy]
+                H_new, idx_u_list = bellman_sdp(H_next, s[t], sys_param)
+
+            # pick a single u via irrigation-deficit tie-breaker
             u_t, _ = extractor_ref(idx_u_list, discr_u, wt)
 
         else:

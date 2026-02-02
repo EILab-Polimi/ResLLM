@@ -75,6 +75,12 @@ def build_parser():
         default=450,
         help="Initial storage in the reservoir",
     )
+    parser.add_argument(
+        "--use-ar1",
+        action="store_true",
+        default=False,
+        help="Use AR(1) autocorrelated inflows for SDP (expands state space)",
+    )
 
     return parser
 
@@ -93,6 +99,7 @@ def main(args):
     starting_storage = args.starting_storage
     lognormal_qstat = args.lognormal_qstat
     sdp_policy_dir = args.sdp_policy_dir
+    use_ar1 = args.use_ar1
 
     # %%— paths
     inflow_file = os.path.abspath(inflow_file)
@@ -173,18 +180,67 @@ def main(args):
     npzfile = np.load("lognormal_qstats.npz")
     sys_param["algorithm"]["q_stat"] = npzfile[lognormal_qstat]
 
+    # %%- AR(1) autocorrelation settings
+    sys_param["algorithm"]["use_ar1"] = use_ar1
+    if use_ar1:
+        T = sys_param["algorithm"]["T"]
+        q_stat_base = sys_param["algorithm"]["q_stat"]
+        
+        # require q_stat to have 3 columns: [mu, sigma, rho]
+        if q_stat_base.shape[1] < 3:
+            raise ValueError(
+                f"AR(1) requires q_stat with 3 columns [mu, sigma, rho], "
+                f"but got shape {q_stat_base.shape}. "
+                f"Pre-compute rho and save to lognormal_qstats.npz."
+            )
+        
+        sys_param["algorithm"]["q_stat"] = q_stat_base[:, :3]
+        
+        # discretize log(q_prev) based on the q_stat distribution
+        # cover mu +/- 3*sigma for all days (99.7% of distribution)
+        mu_vals = q_stat_base[:, 0]
+        sigma_vals = q_stat_base[:, 1]
+        log_q_min = (mu_vals - 3 * sigma_vals).min()
+        log_q_max = (mu_vals + 3 * sigma_vals).max()
+        # round to nice bounds
+        log_q_min = np.floor(log_q_min)
+        log_q_max = np.ceil(log_q_max)
+        # non-uniform grid: finer at low flows, coarser at high flows
+        # split at median log(q) ~ 1.5 (roughly 4.5 TAF/day)
+        log_q_mid = 1.5
+        discr_log_q = np.hstack([
+            np.arange(log_q_min, log_q_mid, 0.25),  # fine: 0.25 spacing
+            np.arange(log_q_mid, log_q_max + 0.5, 0.5),  # coarse: 0.5 spacing
+        ])
+        sys_param["algorithm"]["discr_log_q"] = discr_log_q
+        
+        print(f"AR(1) enabled: mean rho = {sys_param['algorithm']['q_stat'][:, 2].mean():.3f}")
+        print(f"  discr_log_q: {len(discr_log_q)} points, range [{log_q_min:.1f}, {discr_log_q[-1]:.1f}]")
+        print(f"  -> q in [{np.exp(log_q_min):.3f}, {np.exp(discr_log_q[-1]):.1f}] TAF/day")
+
     # %%— run algorithm
     if optimize:
         print(f"Running {algorithm.upper()} optimization...")
         if algorithm == "sdp":
             # run SDP
-            Hopt = opt_sdp(tol=0.1, max_iter=15, sys_param=sys_param)
-            np.savetxt(
-                os.path.join(
-                    out_dir, f"BellmanSDP__beta{int(deficit_penalty_beta)}.txt"
-                ),
-                Hopt,
-            )
+            if use_ar1:
+                from dp.sdp import opt_sdp_ar1
+                Hopt = opt_sdp_ar1(tol=0.1, max_iter=15, sys_param=sys_param)
+                # save as 3D array
+                np.save(
+                    os.path.join(
+                        out_dir, f"BellmanSDP_AR1__beta{int(deficit_penalty_beta)}.npy"
+                    ),
+                    Hopt,
+                )
+            else:
+                Hopt = opt_sdp(tol=0.1, max_iter=15, sys_param=sys_param)
+                np.savetxt(
+                    os.path.join(
+                        out_dir, f"BellmanSDP__beta{int(deficit_penalty_beta)}.txt"
+                    ),
+                    Hopt,
+                )
         elif algorithm == "ddp":
             # run DDP
             Hopt = opt_ddp(disturbance=sim["q"], sys_param=sys_param)
@@ -198,16 +254,26 @@ def main(args):
     # %%— load back & simulate
     if simulate:
         print(f"Running {algorithm.upper()} simulation...")
-        policy = {
-            "H": np.loadtxt(
-                os.path.join(
-                    sdp_policy_dir if sdp_policy_dir else out_dir,
-                    "Bellman{}__beta{}.txt".format(
-                        algorithm.upper(), int(deficit_penalty_beta)
-                    ),
+        if algorithm == "sdp" and use_ar1:
+            policy = {
+                "H": np.load(
+                    os.path.join(
+                        sdp_policy_dir if sdp_policy_dir else out_dir,
+                        f"BellmanSDP_AR1__beta{int(deficit_penalty_beta)}.npy",
+                    )
                 )
-            )
-        }
+            }
+        else:
+            policy = {
+                "H": np.loadtxt(
+                    os.path.join(
+                        sdp_policy_dir if sdp_policy_dir else out_dir,
+                        "Bellman{}__beta{}.txt".format(
+                            algorithm.upper(), int(deficit_penalty_beta)
+                        ),
+                    )
+                )
+            }
         J, s, u, r, G = sim_lake(sim["q"], sim["s_in"], policy, sys_param)
         print(J)
 
