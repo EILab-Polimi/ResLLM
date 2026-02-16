@@ -14,6 +14,7 @@ arnold_et_al_2026/
 *.log
 *.db
 .claude/
+.github/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
