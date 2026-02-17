@@ -17,6 +17,9 @@ class Reservoir:
     Basic reservoir simulation
     """
 
+    # Day count per water year month (Oct–Sep, no leap day)
+    _WY_MONTH_DAYS = (31, 30, 31, 31, 28, 31, 30, 31, 30, 31, 31, 30)
+
     def __init__(
         self,
         characteristics: dict | None = None,
@@ -110,12 +113,12 @@ class Reservoir:
     def evaluate(self, st_1, qt, uu, tocs):
         """
         Evaluates the reservoir release and storage based on the current state, inflow,
-        target release, and day of water year (DOWY).
+        target release, and top of conservation storage.
         Parameters:
             st_1 (float): The storage in the reservoir at the end of the previous time step.
             qt (float): The inflow to the reservoir during the current time step.
             uu (float): The desired release from the reservoir.
-            dowy (int): The current day of the water year (1-365/366).
+            tocs (float): The top of conservation storage (TAF).
         Returns:
             list: A list containing:
                 - rt (float): The actual release from the reservoir.
@@ -187,12 +190,8 @@ class Reservoir:
         return np.interp(S, sp, ep)
 
     def compute_average_cumulative_inflow_by_month(self):
-        """
-        Returns the average cumulative inflow by beinning of month over the water year.
-        Parameters:
-            inflow (pd.DataFrame): DataFrame containing inflow data with columns 'water_year', 'month', and 'inflow'.
-            start_wy (int): Start water year for averaging.
-            end_wy (int): End water year for averaging.
+        """Return average cumulative inflow by beginning of each water year month.
+
         Returns:
             np.ndarray: Array of average cumulative inflow by month of the water year.
         """
@@ -222,21 +221,18 @@ class Reservoir:
         return cumulative_inflow_by_month
 
     def compute_average_remaining_demand_by_month(self):
-        """
-        Returns the average remaining demand by month of the water year.
-        Parameters:
-            demand (np.ndarray): Array of demand data.
+        """Return average remaining demand by month of the water year.
+
         Returns:
             np.ndarray: Array of average remaining demand by month of the water year.
         """
-        # get annual total
         total_demand = self.demand.sum()
-
-        # subtract monthly demand from total demand
         remaining_demand_by_month = np.zeros(12)
         remaining_demand_by_month[0] = int(total_demand)
-        for i in range(11):
-            total_demand -= self.demand[30 * i : 30 * i + 30].sum()
+        cum_days = 0
+        for i, days in enumerate(self._WY_MONTH_DAYS[:11]):
+            total_demand -= self.demand[cum_days : cum_days + days].sum()
             remaining_demand_by_month[i + 1] = int(total_demand)
+            cum_days += days
 
         return remaining_demand_by_month

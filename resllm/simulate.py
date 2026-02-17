@@ -47,7 +47,7 @@ def main():
 
     # Print resolved config
     safe_model_kwargs = {
-        key: ("***" if "key" in key.lower() else value)
+        key: ("***" if key.lower().endswith("_key") else value)
         for key, value in model_kwargs.items()
     }
     print("\n" + "─" * 60)
@@ -111,17 +111,19 @@ def main():
         t = 0
 
         # Setup output filenames
-        safe_model_name = model.replace(":", "-")
+        safe_model_name = model.replace(":", "-").replace("/", "_")
+        safe_reasoning_effort = (args.reasoning_effort or "none").strip().lower().replace(" ", "-")
+        output_stem = f"{safe_model_name}_r-{safe_reasoning_effort}"
         output_dir = os.path.join(file_dir, "output")
         os.makedirs(output_dir, exist_ok=True)
         simulation_output_file = os.path.join(
-            output_dir, f"{safe_model_name}_simulation_output_n{n}.csv"
+            output_dir, f"{output_stem}_simulation_output_n{n}.csv"
         )
         decision_output_file = os.path.join(
-            output_dir, f"{safe_model_name}_decision_output_n{n}.csv"
+            output_dir, f"{output_stem}_decision_output_n{n}.csv"
         )
         logprobs_output_file = os.path.join(
-            output_dir, f"{safe_model_name}_logprobs_output_n{n}.csv"
+            output_dir, f"{output_stem}_logprobs_output_n{n}.csv"
         )
 
         # period of record loop
@@ -145,7 +147,7 @@ def main():
                 st_1 = s0 if t == 0 else R1.record.loc[t - 1, "st"]
 
                 # - LLM Decision at the start of each month
-                if d.day == 1 and not args.model=='release-demand':
+                if d.day == 1 and args.model != 'release-demand':
                     print(f"    Month {mowy:>2} — requesting allocation decision")
                     R1_agent.set_observation(
                         idx=t, date=d, wy=wy, mowy=mowy, dowy=ty + 1, alloc_1=allocation_percent, st_1=st_1
@@ -270,7 +272,7 @@ def parse_args():
         "--model-server",
         required=True,
         default=None,
-        help="Model server to use (e.g., Ollama, OpenAI, xAI)."
+        help="Model server to use (e.g., Ollama, OpenAI, xAI, Baseten)."
     )
     parser.add_argument(
         "--model",
@@ -293,7 +295,7 @@ def parse_args():
     parser.add_argument(
         "--include-red-herring",
         default=True,
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         help="Include red herring in the context (Default: True).",
     )
     parser.add_argument(

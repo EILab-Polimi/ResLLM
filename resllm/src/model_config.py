@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 import os
 
 
-SUPPORTED_MODEL_SERVERS = {"Ollama", "Google", "OpenAI", "xAI", "Mistral"}
+SUPPORTED_MODEL_SERVERS = {"Ollama", "Google", "OpenAI", "xAI", "Mistral", "Baseten"}
 REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high"}
 
 # OpenAI model families that do NOT support the Responses API reasoning
@@ -165,7 +165,7 @@ def resolve_model_config(intent: RunIntent, env: dict | None = None) -> Resolved
                     "OpenAI does not support temperature with reasoning enabled — "
                     "ignoring --temperature."
                 )
-                model_kwargs["temperature"] = None
+                model_kwargs.pop("temperature", None)
 
     elif intent.model_server == "xAI":
         model_kwargs = {
@@ -189,6 +189,15 @@ def resolve_model_config(intent: RunIntent, env: dict | None = None) -> Resolved
                 f"ignoring --reasoning-effort {intent.reasoning_effort}."
             )
 
+    elif intent.model_server == "Baseten":
+        model_kwargs = {
+            "api_key": env_values.get("BASETEN_API_KEY"),
+            "temperature": intent.temperature,
+        }
+        if normalized_effort is not None and normalized_effort != "none":
+            baseten_effort = "low" if normalized_effort == "minimal" else normalized_effort
+            model_kwargs["reasoning"] = {"effort": baseten_effort}
+
     # Ollama allows 0-20; OpenAI allows 0-5 (clamped at call time)
     if top_logprobs is not None and intent.model_server == "Ollama":
         if top_logprobs > 20:
@@ -197,6 +206,7 @@ def resolve_model_config(intent: RunIntent, env: dict | None = None) -> Resolved
     if top_logprobs is not None and intent.model_server == "OpenAI":
         if top_logprobs > 5:
             warnings.append(f"OpenAI top_logprobs clamped from {top_logprobs} to 5 (API maximum).")
+            top_logprobs = 5
 
     # Warn when OpenAI logprobs are requested with reasoning — the logprobs
     # operator does not pass reasoning params, so hybrid models (e.g. gpt-5.2)

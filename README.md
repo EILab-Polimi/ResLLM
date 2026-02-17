@@ -176,12 +176,12 @@ python simulate.py \
 
 ## Model Configuration
 
-Provider-specific settings are resolved centrally in [resllm/src/model_config.py](resllm/src/model_config.py). The CLI arguments (`--model-server`, `--model`, `--reasoning-effort`, `--temperature`, `--include-logprobs`) are captured as a `RunIntent` and resolved into a `ResolvedModelConfig` with validated kwargs, capability flags, and warnings.
+Provider-specific settings are resolved centrally in [resllm/src/model_config.py](resllm/src/model_config.py). CLI arguments (`--model-server`, `--model`, `--reasoning-effort`, `--temperature`, `--include-logprobs`) are captured as a `RunIntent` and resolved into a `ResolvedModelConfig` with validated kwargs, capability flags, and warnings.
 
 Key behaviors:
-- **Reasoning effort** accepts `none`, `minimal`, `low`, `medium`, `high`. The value is normalized and mapped per provider.
-- **Ollama cloud vs local**: Models ending in `-cloud` or `:cloud` receive effort strings (`low`/`medium`/`high`) for the `think` parameter; local models always receive a boolean.
-- **Logprobs** are validated per provider: OpenAI supports 0–5, Ollama supports 0–20. Other providers emit a warning and ignore the flag.
+- **Reasoning effort** accepts `none`, `minimal`, `low`, `medium`, `high`. The value is normalized per provider; `minimal` is mapped to `low` where unsupported. Providers that lack reasoning support (xAI, Mistral) emit a warning and ignore the flag.
+- **Ollama cloud vs local**: Models ending in `-cloud` or `:cloud` receive effort strings (`low`/`medium`/`high`) for the `think` parameter; local models receive a boolean (`none` → `False`, all others including default → `True`).
+- **Logprobs** (`--include-logprobs N`): Ollama local supports 0–20, OpenAI supports 0–5. Cloud Ollama models and all other providers ignore the flag with a warning. **OpenAI logprobs are mutually exclusive with reasoning** — logprobs use a separate Chat Completions operator that does not pass reasoning params, so reasoning models fall back to non-reasoning mode.
 
 ## Reasoning Traces
 
@@ -189,50 +189,38 @@ Reasoning traces (`model_reasoning`) capture the model's chain-of-thought when a
 
 | Provider | Method | Notes |
 |----------|--------|-------|
-| Ollama | Native `think` parameter | Streams thinking text; works with logprobs simultaneously |
-| OpenAI | Responses API summaries | Reasoning models only (e.g., `o4-mini`). **Mutually exclusive with logprobs** — logprobs require a separate Chat Completions operator and a hybrid model (e.g., GPT 5.x) or non-thinking model (e.g., GPT-4.1) |
+| Ollama | Native `think` parameter | Streams thinking text; compatible with logprobs |
+| OpenAI | Responses API summaries | Reasoning models only; non-reasoning prefixes (`gpt-4.1`, `gpt-4o`, `gpt-4-`) use Chat Completions instead |
 | Google | `ThinkingConfig` | Extracted from response parts where `thought=True` |
-| xAI / Mistral | Not currently supported | — |
+| Baseten | Chat Completions `reasoning_effort` | Enables thinking for compatible models |
+| xAI / Mistral | Not supported | — |
 
 ## Token Logprobs
 
-Token-level log probabilities for the `allocation_percent` value are requested via `--include-logprobs N` and written to `<model>_logprobs_output_n<N>.csv`.
+Token-level log probabilities for the `allocation_percent` value are requested via `--include-logprobs N` and written to `<model>_r-<effort>_logprobs_output_n<N>.csv`.
 
-| Provider | Supported Range | Compatible with Reasoning? |
-|----------|----------------|---------------------------|
-| Ollama (local) | 0–20 | Yes |
-| OpenAI | 0–5 | No — uses a separate non-reasoning operator |
-| Others | Not supported | — |
+| Provider | Range | Notes |
+|----------|-------|-------|
+| Ollama (local) | 0–20 | Compatible with reasoning; logprobs and thinking coexist in the same call |
+| OpenAI | 0–5 | Uses a dedicated non-reasoning operator (see Logprobs note above) |
 
 For Ollama local models, numeric values are often tokenized as individual digits (e.g., `85` → `["8", "5"]`). The output includes `n_value_tokens`, `value_tokens`, `joint_logprob`, and `joint_prob` columns that aggregate across all constituent tokens. The per-candidate columns (`top1_*`, …) report raw first-digit token probabilities only.
 
 ---
 
-## Supported LLM Providers and Example Capabilities
-
-| Model | Server | Reasoning Traces | Effort Levels | N-Logprobs | Structured Output |
-|-------|--------|-------------------|---------------|----------|-------------------|
-| `o4-mini-2025-04-16` | OpenAI | Yes (Responses API summaries) | `low`, `medium`, `high` | Not Supported | JSON Schema (strict) |
-| `gpt-5.X` | OpenAI | Yes (Responses API summaries) | `none`, `low`, `medium`, `high` | 0-5 w/ reasoning effort = `none` | JSON Schema (strict) |
-| `gpt-4.1-2025-04-14` | OpenAI | No | N/A | 0-5 | JSON Schema (strict) |
-| `gemini-3-pro-preview` | Google | Yes | `low`, `medium`, `high` | No | JSON Schema |
-| `kimi-k2-thinking:cloud` | Ollama | Yes | `low`, `medium`, `high` | No (cloud) | JSON mode + parsing |
-| `kimi-k2:1t-cloud` | Ollama | No | N/A | No (cloud) | JSON mode + parsing |
-| `kimi-k2.5:cloud` | Ollama | Yes | `none`, `low`, `medium`, `high` | No (cloud) | JSON mode + parsing |
-| `qwen3-next:80b-cloud` | Ollama | Yes | `low`, `medium`, `high` | No (cloud) | JSON mode + parsing |
-| `nemotron-3-nano:30b` | Ollama (local) | Yes | `none` (maps to `False`), `low`, `medium`, `high` (maps to `True`) | 0-20 | JSON mode + parsing |
-| `grok-4-1-fast-reasoning` | xAI | No | N/A | No | JSON Schema (strict) |
-| `grok-4-1-fast-non-reasoning` | xAI | No | N/A | No | JSON Schema (strict) |
-| `mistral-medium-2508` | Mistral | No | N/A | No | JSON Schema (strict) |
-| `mistral-large-2512` | Mistral | No | N/A | No | JSON Schema (strict) |
-
----
-
 ## Output Files
 
-Simulations write to [resllm/output](resllm/output):
+Simulations write to [resllm/output](resllm/output). Filenames encode the model name and reasoning effort:
 
-### Simulation Output (`<model>_simulation_output_n<N>.csv`)
+```
+<model>_r-<effort>_simulation_output_n<N>.csv
+<model>_r-<effort>_decision_output_n<N>.csv
+<model>_r-<effort>_logprobs_output_n<N>.csv     # only when --include-logprobs is set
+```
+
+Where `<model>` is the sanitized model ID (colons → hyphens, slashes → underscores) and `<effort>` is the `--reasoning-effort` value (default `high`). For example, `kimi-k2-thinking-cloud_r-high_simulation_output_n0.csv`.
+
+### Simulation Output
 
 Daily time series:
 
@@ -248,7 +236,7 @@ Daily time series:
 | `dt` | Downstream demand (TAF) |
 | `uu` | Target release = demand × allocation% |
 
-### Decision Output (`<model>_decision_output_n<N>.csv`)
+### Decision Output
 
 Monthly decisions:
 

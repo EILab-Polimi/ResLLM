@@ -14,6 +14,7 @@ dependencies:
   - openai
   - google-genai
   - mistralai
+  - together
   - matplotlib
   - scikit-learn
   - joblib

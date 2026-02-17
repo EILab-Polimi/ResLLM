@@ -20,6 +20,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 
 from src.prompts import (
+    CONCEPT_KEYS,
     OLLAMA_JSON_INSTRUCTION,
     build_instructions,
     build_observation,
@@ -30,17 +31,6 @@ from src.prompts import (
 # =============================================================================
 # Data Models
 # =============================================================================
-
-# Canonical concept key list — single source of truth used by the fuzzy
-# matcher, the TypedDict, and the Ollama JSON instruction prompt.
-CONCEPT_KEYS: tuple[str, ...] = (
-    "environment_setting", "goal", "operational_limits",
-    "average_cumulative_inflow_by_month", "average_remaining_demand_by_month",
-    "previous_allocation", "current_month", "current_storage",
-    "current_cumulative_observed_inflow", "current_water_year_remaining_demand",
-    "next_water_year_demand", "mean_forecast", "percentile_forecast_10th",
-    "percentile_forecast_90th", "puppies",
-)
 
 
 class OperationalConcepts(TypedDict):
@@ -105,7 +95,7 @@ class BaseReservoirOperator:
         if reservoir is None:
             raise ValueError("reservoir cannot be None")
         self.reservoir = reservoir
-        self.system_message = build_system_message(model_id)
+        self.system_message = build_system_message()
         self.instructions = build_instructions(reservoir, include_red_herring)
         self.observation: str | None = None
         self.record = pd.DataFrame()
@@ -207,9 +197,25 @@ class BaseReservoirOperator:
 
 _MAX_RETRIES = 3
 
+
+def _with_retries(fn, *, label: str):
+    """Call *fn* with up to ``_MAX_RETRIES`` attempts."""
+    last_err: Exception | None = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_err = e
+            print(f"    ⚠  {label} attempt {attempt}/{_MAX_RETRIES} failed: {e}")
+    raise RuntimeError(
+        f"{label} API call failed after {_MAX_RETRIES} attempts: {last_err}"
+    ) from last_err
+
+
 # xAI and Mistral use an OpenAI-compatible endpoint
 _XAI_BASE_URL = "https://api.x.ai/v1"
 _MISTRAL_BASE_URL = "https://api.mistral.ai/v1"
+_BASETEN_BASE_URL = "https://inference.baseten.co/v1"
 
 
 def _call_openai_responses(
@@ -270,6 +276,21 @@ def _call_openai_responses(
     return AllocationDecision(**json.loads(response_text)), reasoning_text
 
 
+def _extract_think_tags(text: str) -> tuple[str, str]:
+    """Split ``<think>...</think>`` blocks from the remaining content.
+
+    Returns:
+        (thinking_text, remaining_content)
+    """
+    think_blocks: list[str] = []
+    remaining = text
+    for m in re.finditer(r"<think>(.*?)</think>", text, re.DOTALL):
+        think_blocks.append(m.group(1).strip())
+    if think_blocks:
+        remaining = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    return "\n\n".join(think_blocks), remaining
+
+
 def _call_openai_compatible(
     client: OpenAI,
     model: str,
@@ -280,13 +301,15 @@ def _call_openai_compatible(
 ) -> tuple[AllocationDecision, str | None]:
     """Call an OpenAI-compatible API with structured JSON output.
 
-    Works for OpenAI, xAI, and Mistral (all expose an OpenAI-compatible
-    chat completions endpoint).
+    Works for OpenAI, xAI, Mistral, and Baseten (all expose an
+    OpenAI-compatible chat completions endpoint).
 
     For **OpenAI** with reasoning enabled, uses the **Responses API**
     (``/v1/responses``) which supports the ``reasoning`` parameter and
-    returns reasoning summaries.  For xAI / Mistral (or OpenAI without
-    reasoning), falls back to **Chat Completions** with ``reasoning_effort``.
+    returns reasoning summaries.  For third-party providers (or OpenAI
+    without reasoning), falls back to **Chat Completions**.  Baseten
+    reasoning calls also send ``chat_template_args`` for models that
+    require explicit thinking enablement (e.g. GLM).
 
     Returns:
         (AllocationDecision, reasoning_text_or_None)
@@ -308,31 +331,109 @@ def _call_openai_compatible(
         )
 
     # ------------------------------------------------------------------
-    # Chat Completions path (xAI, Mistral, or OpenAI without reasoning)
+    # Chat Completions path (xAI, Mistral, Baseten, or OpenAI w/o reasoning)
     # ------------------------------------------------------------------
+    is_third_party = (
+        client.base_url is not None
+        and "api.openai.com" not in str(client.base_url)
+    )
+
+    # Third-party reasoning models cannot separate thinking tokens from
+    # content when ``response_format`` is set.  Currently only Baseten
+    # reaches this path — xAI and Mistral reasoning effort is ignored at
+    # config resolution time.  Drop structured output and parse JSON manually.
+    use_freeform = is_third_party and reasoning is not None
+
+    if use_freeform:
+        sys_content = f"{system_content}{OLLAMA_JSON_INSTRUCTION}"
+    else:
+        sys_content = system_content
+
     messages = [
-        {"role": "system", "content": system_content},
+        {"role": "system", "content": sys_content},
         {"role": "user", "content": user_content},
     ]
 
     api_params: dict = {
         "model": model,
         "messages": messages,
-        "response_format": {
+    }
+
+    if not use_freeform:
+        api_params["response_format"] = {
             "type": "json_schema",
             "json_schema": {
                 "name": "allocation_decision",
                 "strict": True,
                 "schema": schema,
             },
-        },
-    }
+        }
+
     if temperature is not None:
         api_params["temperature"] = temperature
 
+    # Non-OpenAI providers may need an explicit max_tokens to avoid
+    # truncating long structured responses (especially with reasoning).
+    # When thinking is enabled, thinking tokens count against this limit,
+    # so we use a much larger budget for reasoning calls.
+    if is_third_party:
+        api_params["max_tokens"] = 65536 if use_freeform else 16384
+
+    # Third-party providers may accept reasoning_effort at the top level
+    if reasoning is not None and not is_openai_native:
+        effort = reasoning.get("effort")
+        extra: dict = {}
+        if effort:
+            extra["reasoning_effort"] = effort
+        # Baseten vLLM models (e.g. GLM) may require enable_thinking via
+        # chat_template_args instead of / in addition to reasoning_effort.
+        if "baseten.co" in str(client.base_url):
+            extra["chat_template_args"] = {"enable_thinking": True}
+        if extra:
+            api_params["extra_body"] = extra
+
     completion = client.chat.completions.create(**api_params)
-    response_text = completion.choices[0].message.content
-    return AllocationDecision(**json.loads(response_text)), None
+    choice = completion.choices[0]
+    message = choice.message
+    response_text = message.content
+
+    # ------------------------------------------------------------------
+    # Reasoning trace extraction
+    # ------------------------------------------------------------------
+    reasoning_text: str | None = None
+
+    # Source 1: API-level reasoning_content (e.g. Kimi-K2-Thinking)
+    api_reasoning = (
+        getattr(message, "reasoning_content", None)
+        or getattr(message, "reasoning", None)
+        or (getattr(message, "model_extra", {}) or {}).get("reasoning_content")
+        or (getattr(message, "model_extra", {}) or {}).get("reasoning")
+    ) or None
+
+    # Source 2: <think> tags in the content (freeform mode)
+    think_text = ""
+    if response_text and use_freeform:
+        think_text, response_text = _extract_think_tags(response_text)
+
+    # Combine: prefer API-level, fall back to <think> tags
+    reasoning_text = api_reasoning or think_text or None
+
+    if not response_text:
+        raise ValueError(
+            f"Model '{model}' returned empty content. "
+            f"finish_reason={choice.finish_reason}"
+        )
+
+    try:
+        payload = json.loads(response_text)
+    except json.JSONDecodeError:
+        # Fall back to the robust parser that handles markdown fences / extra text
+        payload = _parse_json_response(response_text)
+
+    # Normalize keys for providers that may deviate (camelCase, fuzzy concepts)
+    payload = _normalize_decision_payload(payload)
+
+    return AllocationDecision(**payload), reasoning_text
 
 
 def _call_google(
@@ -407,14 +508,14 @@ def _call_ollama(
     model_kwargs: dict,
     *,
     top_logprobs: int | None = None,
-) -> tuple[AllocationDecision, str, str, list | None]:
+) -> tuple[AllocationDecision, str | None, str, list | None]:
     """Call Ollama with JSON format, optional thinking, and optional logprobs.
 
     When *top_logprobs* is not ``None`` the call is **non-streaming** so that
     the full logprobs array is returned on the response object.
 
     Returns:
-        (AllocationDecision, thinking_text, raw_content_text, logprobs_data)
+        (AllocationDecision, thinking_text_or_None, raw_content_text, logprobs_data)
     """
     from ollama import chat
 
@@ -445,7 +546,7 @@ def _call_ollama(
         response = chat(**chat_kwargs)
 
         raw_text = (getattr(response.message, "content", None) or "").strip()
-        thinking_text = (getattr(response.message, "thinking", None) or "").strip()
+        thinking_text = (getattr(response.message, "thinking", None) or "").strip() or None
         logprobs_data = getattr(response, "logprobs", None)
 
         decision = _parse_ollama_decision(raw_text)
@@ -470,7 +571,7 @@ def _call_ollama(
         if c := getattr(msg, "content", None):
             content_parts.append(c)
 
-    thinking_text = "".join(thinking_parts).strip()
+    thinking_text = "".join(thinking_parts).strip() or None
     raw_text = "".join(content_parts).strip()
 
     decision = _parse_ollama_decision(raw_text)
@@ -480,13 +581,49 @@ def _call_ollama(
 def _parse_ollama_decision(raw_text: str) -> AllocationDecision:
     """Parse and normalize an Ollama JSON response into an AllocationDecision."""
     payload = _parse_json_response(raw_text)
-    payload = _normalize_ollama_payload(payload)
+    payload = _normalize_decision_payload(payload)
     return AllocationDecision(**payload)
 
 
 # =============================================================================
-# Ollama response normalization (module-level for reuse)
+# Response normalization (module-level for reuse)
 # =============================================================================
+
+def _sanitize_json_string(text: str) -> str:
+    """Escape literal control characters inside JSON string values.
+
+    Some providers return JSON with raw newlines / tabs inside quoted
+    values instead of the required ``\\n`` / ``\\t`` escape sequences.
+    This function fixes that so ``json.loads`` succeeds.
+    """
+    # Replace unescaped control characters inside strings with their
+    # JSON-safe escape sequence.  We operate character-by-character to
+    # avoid mangling structural whitespace between keys.
+    _CTRL = {
+        "\n": "\\n",
+        "\r": "\\r",
+        "\t": "\\t",
+    }
+    in_string = False
+    escaped = False
+    chars: list[str] = []
+    for ch in text:
+        if escaped:
+            chars.append(ch)
+            escaped = False
+            continue
+        if ch == "\\" and in_string:
+            chars.append(ch)
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+        if in_string and ch in _CTRL:
+            chars.append(_CTRL[ch])
+        else:
+            chars.append(ch)
+    return "".join(chars)
+
 
 def _parse_json_response(raw_text: str) -> dict:
     """Parse JSON from model response, handling markdown fences and extra text."""
@@ -510,14 +647,17 @@ def _parse_json_response(raw_text: str) -> dict:
         if start != -1 and end > start:
             cleaned = cleaned[start:end + 1]
 
+    # Escape literal control characters inside JSON string values
+    cleaned = _sanitize_json_string(cleaned)
+
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Model returned non-JSON content: {raw_text[:500]}") from exc
 
 
-def _normalize_ollama_payload(payload: dict) -> dict:
-    """Normalize Ollama JSON keys to expected AllocationDecision fields."""
+def _normalize_decision_payload(payload: dict) -> dict:
+    """Normalize provider JSON keys to expected AllocationDecision fields."""
     if not isinstance(payload, dict):
         return payload
 
@@ -535,7 +675,7 @@ def _normalize_ollama_payload(payload: dict) -> dict:
         if len(normalized) == 1:
             inner = next(iter(normalized.values()))
             if isinstance(inner, dict):
-                return _normalize_ollama_payload(inner)
+                return _normalize_decision_payload(inner)
 
     # Normalize concept importance keys
     aci = normalized.get("allocation_concept_importance")
@@ -624,7 +764,7 @@ class ReservoirAllocationOperator(BaseReservoirOperator):
         self.logprobs_record = pd.DataFrame()
 
         # Pre-build OpenAI-compatible client for providers that use it
-        if model_server in ("OpenAI", "xAI", "Mistral"):
+        if model_server in ("OpenAI", "xAI", "Mistral", "Baseten"):
             client_kwargs: dict = {}
             if model_server == "OpenAI":
                 client_kwargs["api_key"] = self.model_kwargs.get("api_key") or os.getenv("OPENAI_API_KEY")
@@ -634,6 +774,9 @@ class ReservoirAllocationOperator(BaseReservoirOperator):
             elif model_server == "Mistral":
                 client_kwargs["api_key"] = self.model_kwargs.get("api_key") or os.getenv("MISTRAL_API_KEY")
                 client_kwargs["base_url"] = _MISTRAL_BASE_URL
+            elif model_server == "Baseten":
+                client_kwargs["api_key"] = self.model_kwargs.get("api_key") or os.getenv("BASETEN_API_KEY")
+                client_kwargs["base_url"] = _BASETEN_BASE_URL
             self._openai_client = OpenAI(**client_kwargs)
 
     # --------------------------------------------------------------------- #
@@ -647,18 +790,27 @@ class ReservoirAllocationOperator(BaseReservoirOperator):
         decision: AllocationDecision
         reasoning_text: str | None = None
 
-        if self.model_server in ("OpenAI", "xAI", "Mistral"):
-            decision, reasoning_text = self._call_openai_compat(system_content)
+        if self.model_server in ("OpenAI", "xAI", "Mistral", "Baseten"):
+            decision, reasoning_text = _with_retries(
+                lambda: self._call_openai_compat(system_content),
+                label=self.model_server,
+            )
         elif self.model_server == "Google":
-            decision, reasoning_text = _call_google(
-                self.model_id, system_content, self.observation, self.model_kwargs,
+            decision, reasoning_text = _with_retries(
+                lambda: _call_google(
+                    self.model_id, system_content, self.observation, self.model_kwargs,
+                ),
+                label="Google",
             )
         elif self.model_server == "Ollama":
-            decision, thinking, _raw, logprobs_data = _call_ollama(
-                self.model_id, system_content, self.observation, self.model_kwargs,
-                top_logprobs=self.top_logprobs,
+            decision, thinking, _raw, logprobs_data = _with_retries(
+                lambda: _call_ollama(
+                    self.model_id, system_content, self.observation, self.model_kwargs,
+                    top_logprobs=self.top_logprobs,
+                ),
+                label="Ollama",
             )
-            reasoning_text = thinking or None
+            reasoning_text = thinking
         else:
             raise ValueError(f"Unsupported model server: {self.model_server}")
 
@@ -688,28 +840,15 @@ class ReservoirAllocationOperator(BaseReservoirOperator):
         )
 
     def _call_openai_compat(self, system_content: str) -> tuple[AllocationDecision, str | None]:
-        """Call OpenAI-compatible provider with retries."""
-        reasoning = self.model_kwargs.get("reasoning")
-        temperature = self.model_kwargs.get("temperature")
-        last_err: Exception | None = None
-
-        for _ in range(_MAX_RETRIES):
-            try:
-                decision, reasoning_text = _call_openai_compatible(
-                    self._openai_client,
-                    self.model_id,
-                    system_content,
-                    self.observation,
-                    temperature=temperature,
-                    reasoning=reasoning,
-                )
-                return decision, reasoning_text
-            except Exception as e:
-                last_err = e
-
-        raise RuntimeError(
-            f"{self.model_server} API call failed after {_MAX_RETRIES} attempts"
-        ) from last_err
+        """Call OpenAI-compatible provider."""
+        return _call_openai_compatible(
+            self._openai_client,
+            self.model_id,
+            system_content,
+            self.observation,
+            temperature=self.model_kwargs.get("temperature"),
+            reasoning=self.model_kwargs.get("reasoning"),
+        )
 
 
 # =============================================================================

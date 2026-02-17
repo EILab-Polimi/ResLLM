@@ -13,7 +13,7 @@ def cfs_to_taf(cfs):
 
 
 def taf_to_cfs(taf):
-    return taf * 1000 / 86400 * 43560
+    return taf * 1000 * 43560 / 86400
 
 
 def water_day(d):

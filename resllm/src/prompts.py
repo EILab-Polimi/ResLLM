@@ -97,6 +97,23 @@ OBSERVATION_ALLOCATION_DECISION = dedent("""\
 
 
 # =============================================================================
+# SHARED CONSTANTS
+# =============================================================================
+
+# Canonical concept key list — single source of truth used by the fuzzy
+# matcher in operator.py, the OperationalConcepts TypedDict, and the
+# Ollama/freeform JSON instruction prompt below.
+CONCEPT_KEYS: tuple[str, ...] = (
+    "environment_setting", "goal", "operational_limits",
+    "average_cumulative_inflow_by_month", "average_remaining_demand_by_month",
+    "previous_allocation", "current_month", "current_storage",
+    "current_cumulative_observed_inflow", "current_water_year_remaining_demand",
+    "next_water_year_demand", "mean_forecast", "percentile_forecast_10th",
+    "percentile_forecast_90th", "puppies",
+)
+
+
+# =============================================================================
 # OLLAMA NATIVE PROMPTS
 # =============================================================================
 
@@ -104,11 +121,7 @@ OLLAMA_JSON_INSTRUCTION = (
     "\nRespond with valid JSON for the AllocationDecision schema."
     "\nUse exact keys: allocation_reasoning, allocation_percent, allocation_concept_importance."
     "\nThe allocation_concept_importance object MUST include these exact keys and the values MUST be integers: "
-    "environment_setting, goal, operational_limits, average_cumulative_inflow_by_month, "
-    "average_remaining_demand_by_month, previous_allocation, current_month, current_storage, "
-    "current_cumulative_observed_inflow, current_water_year_remaining_demand, "
-    "next_water_year_demand, mean_forecast, percentile_forecast_10th, "
-    "percentile_forecast_90th, puppies."
+    + ", ".join(CONCEPT_KEYS) + "."
 )
 
 
@@ -116,7 +129,7 @@ OLLAMA_JSON_INSTRUCTION = (
 # HELPER FUNCTIONS
 # =============================================================================
 
-def build_system_message(model_version: str) -> str:
+def build_system_message() -> str:
     """Build the system message."""
     return SYSTEM_MESSAGE_BASE
 
