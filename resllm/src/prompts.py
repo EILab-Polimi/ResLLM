@@ -12,9 +12,6 @@ from textwrap import dedent
 # SYSTEM MESSAGE TEMPLATES
 # =============================================================================
 
-SYSTEM_MESSAGE_GPT_OSS_PREFIX = dedent("""\
-    Reasoning: high
-    """)
 
 SYSTEM_MESSAGE_BASE = dedent("""\
     You are a water reservoir operator.
@@ -100,15 +97,6 @@ OBSERVATION_ALLOCATION_DECISION = dedent("""\
 
 
 # =============================================================================
-# DOUBLE CHECK / FOLLOW-UP PROMPTS
-# =============================================================================
-
-DOUBLE_CHECK_PROMPT = dedent("""\
-    Double check your response and make sure you are confident in the percent allocation decision. Comment on any changes to your decision in the justification.
-    """)
-
-
-# =============================================================================
 # OLLAMA NATIVE PROMPTS
 # =============================================================================
 
@@ -129,12 +117,8 @@ OLLAMA_JSON_INSTRUCTION = (
 # =============================================================================
 
 def build_system_message(model_version: str) -> str:
-    """Build the system message, optionally including GPT-OSS prefix."""
-    message = ""
-    if "gpt-oss" in model_version:
-        message += SYSTEM_MESSAGE_GPT_OSS_PREFIX
-    message += SYSTEM_MESSAGE_BASE
-    return message
+    """Build the system message."""
+    return SYSTEM_MESSAGE_BASE
 
 
 def build_instructions(reservoir, include_red_herring: bool = False) -> str:
@@ -203,7 +187,7 @@ def build_observation(
     # Add forecast if available
     if qwy_forecast_mean is not None:
         observation += OBSERVATION_FORECAST.format(
-            forecast_mean=int(qwy_forecast_mean) if qwy_forecast_mean is not None else 0,
+            forecast_mean=int(qwy_forecast_mean),
             forecast_10=int(qwy_forecast_10) if qwy_forecast_10 is not None else 0,
             forecast_90=int(qwy_forecast_90) if qwy_forecast_90 is not None else 0,
         )
