@@ -9,7 +9,8 @@ import pandas as pd
 
 # resllm imports
 from src.reservoir import Reservoir
-from src.operator import ReservoirAllocationOperator
+from src.operator import build_operator
+from src.model_config import RunIntent, resolve_model_config
 import src.utils as utils
 
 # dotenv imports
@@ -30,49 +31,39 @@ def main():
     # Samples
     nsample = args.nsample
 
-    # Model/server selection
-    model_server = args.model_server
-    model = args.model
-    if model_server=='Ollama':
-        model_kwargs = {
-            "temperature": args.temperature,
-            "think": True,
-            "timeout": 3600  # 60 minutes
-        }
-    elif model_server == "Google":
-        model_kwargs = {
-            "api_key": os.getenv("GOOGLE_API_KEY"),
-            "temperature": args.temperature,
-            "thinking_level": args.reasoning_effort,
-            "include_thoughts": True
-        }
-    elif model_server == "OpenAI":
-        if args.reasoning_effort == "na":
-            model_kwargs = {
-                "api_key": os.getenv("OPENAI_API_KEY"),
-                "temperature": args.temperature,
-            }
-        else:   
-            model_kwargs = {
-                "api_key": os.getenv("OPENAI_API_KEY"),
-                "temperature": args.temperature,
-                "reasoning": {
-                    "effort": args.reasoning_effort,
-                    "summary": "detailed",
-                },
-            }
-    elif model_server == "xAI":
-        model_kwargs = {
-            "api_key": os.getenv("XAI_API_KEY"),
-            "temperature": args.temperature
-        }
-    elif model_server == "Mistral":
-        model_kwargs = {
-            "api_key": os.getenv("MISTRAL_API_KEY"),
-            "temperature": args.temperature
-        }
-    else:
-        raise ValueError(f"Unsupported model server: {model_server}")
+    # Model/server selection and provider capability resolution
+    resolved_model_config = resolve_model_config(
+        RunIntent(
+            model_server=args.model_server,
+            model=args.model,
+            reasoning_effort=args.reasoning_effort,
+            temperature=args.temperature,
+            include_logprobs=args.include_logprobs,
+        )
+    )
+    model_server = resolved_model_config.model_server
+    model = resolved_model_config.model
+    model_kwargs = resolved_model_config.model_kwargs
+
+    # Print resolved config
+    safe_model_kwargs = {
+        key: ("***" if "key" in key.lower() else value)
+        for key, value in model_kwargs.items()
+    }
+    print("\n" + "─" * 60)
+    print(f"  Model Server:  {model_server}")
+    print(f"  Model:         {model}")
+    print(f"  Logprobs:      {resolved_model_config.top_logprobs or 'off'}")
+    for k, v in safe_model_kwargs.items():
+        if k not in ("api_key",):
+            print(f"  {k}: {v}")
+    print("─" * 60)
+
+    # Print warnings after config summary
+    for warning in resolved_model_config.warnings:
+        print(f"\n⚠  {warning}")
+    if resolved_model_config.warnings:
+        print()
 
     # tocs option
     if args.tocs in ['fixed','historical']:
@@ -98,12 +89,9 @@ def main():
     R1 = Reservoir(characteristics=R1_characteristics)
 
     # --- AGENT --- #
-    R1_agent = ReservoirAllocationOperator(
-        model_and_version=[model_server, model],
-        reservoir=R1,
-        model_kwargs=model_kwargs,
-        include_double_check=args.include_double_check,
-        include_num_history=args.include_num_history,
+    R1_agent = build_operator(
+        resolved_model_config,
+        R1,
         include_red_herring=args.include_red_herring,
         debug_response=args.debug_response,
     )
@@ -132,10 +120,14 @@ def main():
         decision_output_file = os.path.join(
             output_dir, f"{safe_model_name}_decision_output_n{n}.csv"
         )
+        logprobs_output_file = os.path.join(
+            output_dir, f"{safe_model_name}_logprobs_output_n{n}.csv"
+        )
 
         # period of record loop
+        print(f"\n══ Simulation Start (sample {n}, WY {start_wy}–{end_wy}) ═" + "═" * 20)
         for wy in np.arange(start_wy, end_wy + 1):
-            print(f"Simulating water year {wy}")
+            print(f"  Water year {wy}")
             # date range for the water year
             date_range = pd.date_range(start=f"{wy-1}-10-01", end=f"{wy}-09-30", freq="D")
             # remove leap day
@@ -154,7 +146,7 @@ def main():
 
                 # - LLM Decision at the start of each month
                 if d.day == 1 and not args.model=='release-demand':
-                    print(f"Setting allocation decision for month {mowy} of water year {wy}")
+                    print(f"    Month {mowy:>2} — requesting allocation decision")
                     R1_agent.set_observation(
                         idx=t, date=d, wy=wy, mowy=mowy, dowy=ty + 1, alloc_1=allocation_percent, st_1=st_1
                     )
@@ -207,6 +199,12 @@ def main():
                         ).to_csv(
                             decision_output_file, quotechar='"', index=False, mode='a',
                             header=not os.path.exists(decision_output_file)
+                        )
+                    logprobs_df = R1_agent.pop_logprobs_record()
+                    if not logprobs_df.empty:
+                        logprobs_df.to_csv(
+                            logprobs_output_file, index=False, mode='a',
+                            header=not os.path.exists(logprobs_output_file)
                         )
 
         # Outputs are already saved incrementally at the end of each month
@@ -284,25 +282,13 @@ def parse_args():
         "--reasoning-effort",
         type=str,
         default="high",
-        help="(OpenAI reasoning/hybrid models (e.g., GPT 5.1 or o4-mini) reasoning effort level: none (GPT 5.1), low, medium, high.",
+        help="Reasoning effort for supported models: none, minimal, low, medium, high (Default: high).",
     )
     parser.add_argument(
         "--temperature",
         type=float,
         default=None,
         help="Temperature for local models.",
-    )
-    parser.add_argument(
-        "--include-double-check",
-        default=False,
-        action="store_true",
-        help="Include double check on the decision (Default: False).",
-    )
-    parser.add_argument(
-        "--include-num-history",
-        default=0,
-        type=int,
-        help="Include number of historical timesteps in the context (Default: 0).",
     )
     parser.add_argument(
         "--include-red-herring",
@@ -316,7 +302,12 @@ def parse_args():
         action="store_true",
         help="Capture raw model response payloads for inspection (Default: False).",
     )
-
+    parser.add_argument(
+        "--include-logprobs",
+        default=None,
+        type=int,
+        help="Include top N log probabilities in output (OpenAI 0-5, Ollama 0-20, Default: None).",
+    )
     return parser.parse_args()
 
 

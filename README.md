@@ -39,7 +39,7 @@ Daily Loop (t = 1 to T)
 └─> Advance to next day: t = t + 1
     (loop back to top)
 
-Note: The LLM agent is stateless — it receives only the current state 
+Note: The LLM agent is stateless — it receives only the current state
 and forecast, not previous decisions or historical simulation outputs.
 ```
 
@@ -53,7 +53,7 @@ Each month, the LLM receives a prompt containing:
 4. **Forecasts** (optional) — Probabilistic water year inflow projections (mean, 10th, 90th percentiles)
 5. **Red herring** (optional) — Irrelevant information to test model focus
 
-By default, the agent sees only the current state snapshot, not its previous decisions or the simulation's historical outputs.
+The agent always sees only the current state snapshot, not its previous decisions or the simulation's historical outputs.
 
 The LLM responds with a structured JSON containing:
 - **allocation_percent** — Fraction of demand to release (0–100%)
@@ -86,7 +86,9 @@ ResLLM/
 │   ├── batch/               # OpenAI Batch API tools for ablation studies
 │   └── src/
 │       ├── reservoir.py     # Reservoir class (mass balance, TOCS, constraints)
-│       ├── operator.py      # ReservoirAllocationOperator (LLM agent)
+│       ├── operator.py      # LLM operators (native provider APIs + logprobs)
+│       ├── prompts.py       # All prompt templates and builder functions
+│       ├── model_config.py  # Centralized provider config resolver
 │       └── utils.py         # Unit conversions, date utilities
 ├── data/
 │   ├── demand.txt           # 365-day demand series (TAF)
@@ -104,11 +106,14 @@ ResLLM/
 ```bash
 git clone https://github.com/wyattarnold/ResLLM.git
 cd ResLLM
-pip install -r requirements.txt
+
+# Conda (recommended)
+conda env create -f environment.yml
+conda activate llm
 
 # For cloud APIs, create a .env file
 cp .env.example .env
-# Add your keys: OPENAI_API_KEY, OLLAMA_API_KEY
+# Add provider keys as needed: OPENAI_API_KEY, GOOGLE_API_KEY, XAI_API_KEY, MISTRAL_API_KEY
 ```
 
 ---
@@ -144,12 +149,11 @@ python simulate.py \
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--nsample` | `1` | Number of replicate simulations |
-| `--temperature` | `1.0` | Sampling temperature |
+| `--temperature` | `None` | Sampling temperature override |
 | `--tocs` | `fixed` | TOCS mode: `fixed` (seasonal curve) or `historical` (max of curve and observed) |
 | `--wy-forecast-file` | `None` | Probabilistic forecast file (enables forecast context) |
 | `--reasoning-effort` | `high` | Reasoning level for supported models |
-| `--include-double-check` | `False` | Ask model to verify its decision |
-| `--include-num-history` | `0` | Number of past decisions to include in context |
+| `--include-logprobs` | `None` | Request top-N token logprobs (`OpenAI`: 0–5, `Ollama`: 0–20) |
 | `--include-red-herring` | `True` | Include irrelevant text to test focus |
 | `--debug-response` | `False` | Save raw model responses for inspection |
 
@@ -170,25 +174,57 @@ python simulate.py \
 
 ---
 
-## Reasoning traces (CoT) handling
+## Model Configuration
 
-`model_reasoning` is populated differently per provider in [resllm/src/operator.py](resllm/src/operator.py):
+Provider-specific settings are resolved centrally in [resllm/src/model_config.py](resllm/src/model_config.py). The CLI arguments (`--model-server`, `--model`, `--reasoning-effort`, `--temperature`, `--include-logprobs`) are captured as a `RunIntent` and resolved into a `ResolvedModelConfig` with validated kwargs, capability flags, and warnings.
 
-- Ollama: Uses the native Ollama chat stream (when `think` is enabled) to capture the model’s thinking text. This stream is stored as `model_reasoning`.
-- OpenAI: Uses the provider’s structured response; `model_reasoning` is set from the SDK’s `reasoning_content` when available.
-- Google (Gemini): Uses thought summaries (not signatures). `includeThoughts` is enabled in [resllm/simulate.py](resllm/simulate.py), and `model_reasoning` is extracted from response `parts` where `thought=True`.
+Key behaviors:
+- **Reasoning effort** accepts `none`, `minimal`, `low`, `medium`, `high`. The value is normalized and mapped per provider.
+- **Ollama cloud vs local**: Models ending in `-cloud` or `:cloud` receive effort strings (`low`/`medium`/`high`) for the `think` parameter; local models always receive a boolean.
+- **Logprobs** are validated per provider: OpenAI supports 0–5, Ollama supports 0–20. Other providers emit a warning and ignore the flag.
+
+## Reasoning Traces
+
+Reasoning traces (`model_reasoning`) capture the model's chain-of-thought when available:
+
+| Provider | Method | Notes |
+|----------|--------|-------|
+| Ollama | Native `think` parameter | Streams thinking text; works with logprobs simultaneously |
+| OpenAI | Responses API summaries | Reasoning models only (e.g., `o4-mini`). **Mutually exclusive with logprobs** — logprobs require a separate Chat Completions operator and a hybrid model (e.g., GPT 5.x) or non-thinking model (e.g., GPT-4.1) |
+| Google | `ThinkingConfig` | Extracted from response parts where `thought=True` |
+| xAI / Mistral | Not currently supported | — |
+
+## Token Logprobs
+
+Token-level log probabilities for the `allocation_percent` value are requested via `--include-logprobs N` and written to `<model>_logprobs_output_n<N>.csv`.
+
+| Provider | Supported Range | Compatible with Reasoning? |
+|----------|----------------|---------------------------|
+| Ollama (local) | 0–20 | Yes |
+| OpenAI | 0–5 | No — uses a separate non-reasoning operator |
+| Others | Not supported | — |
+
+For Ollama local models, numeric values are often tokenized as individual digits (e.g., `85` → `["8", "5"]`). The output includes `n_value_tokens`, `value_tokens`, `joint_logprob`, and `joint_prob` columns that aggregate across all constituent tokens. The per-candidate columns (`top1_*`, …) report raw first-digit token probabilities only.
 
 ---
 
-## Supported LLM Providers
+## Supported LLM Providers and Example Capabilities
 
-| Provider | Server | Model | Notes |
-|----------|-------------|---------------|-------|
-| **Ollama** | `Ollama` | `kimi-k2-thinking:cloud` | Local or cloud; supports thinking trace capture |
-| **OpenAI** | `OpenAI` | `o4-mini-2025-04-16` | Requires `OPENAI_API_KEY` |
-| **Google** | `Google` | `gemini-2.5-pro` | Requires `GOOGLE_API_KEY` |
-| **xAI** | `xAI` | `grok-4-0709` | Requires `XAI_API_KEY` |
-| **Mistral** | `Mistral` | `mistral-large-2512` | Requires `MISTRAL_API_KEY` |
+| Model | Server | Reasoning Traces | Effort Levels | N-Logprobs | Structured Output |
+|-------|--------|-------------------|---------------|----------|-------------------|
+| `o4-mini-2025-04-16` | OpenAI | Yes (Responses API summaries) | `low`, `medium`, `high` | Not Supported | JSON Schema (strict) |
+| `gpt-5.X` | OpenAI | Yes (Responses API summaries) | `none`, `low`, `medium`, `high` | 0-5 w/ reasoning effort = `none` | JSON Schema (strict) |
+| `gpt-4.1-2025-04-14` | OpenAI | No | N/A | 0-5 | JSON Schema (strict) |
+| `gemini-3-pro-preview` | Google | Yes | `low`, `medium`, `high` | No | JSON Schema |
+| `kimi-k2-thinking:cloud` | Ollama | Yes | `low`, `medium`, `high` | No (cloud) | JSON mode + parsing |
+| `kimi-k2:1t-cloud` | Ollama | No | N/A | No (cloud) | JSON mode + parsing |
+| `kimi-k2.5:cloud` | Ollama | Yes | `none`, `low`, `medium`, `high` | No (cloud) | JSON mode + parsing |
+| `qwen3-next:80b-cloud` | Ollama | Yes | `low`, `medium`, `high` | No (cloud) | JSON mode + parsing |
+| `nemotron-3-nano:30b` | Ollama (local) | Yes | `none` (maps to `False`), `low`, `medium`, `high` (maps to `True`) | 0-20 | JSON mode + parsing |
+| `grok-4-1-fast-reasoning` | xAI | No | N/A | No | JSON Schema (strict) |
+| `grok-4-1-fast-non-reasoning` | xAI | No | N/A | No | JSON Schema (strict) |
+| `mistral-medium-2508` | Mistral | No | N/A | No | JSON Schema (strict) |
+| `mistral-large-2512` | Mistral | No | N/A | No | JSON Schema (strict) |
 
 ---
 
@@ -287,6 +323,21 @@ date,QCYFHM,QCYFH1,QCYFH9
 - `QCYFH9`: 90th percentile
 
 The example data uses California's Folsom Reservoir, but you can substitute any reservoir by providing appropriate config and data files.
+
+---
+
+## Architecture Notes
+
+### Operator Classes
+
+- **`BaseReservoirOperator`** — Shared observation-setting, decision-recording, and `pop_logprobs_record()` logic.
+- **`ReservoirAllocationOperator`** — Multi-provider operator using native APIs (OpenAI, Google, Ollama, xAI, Mistral). Supports reasoning traces and Ollama logprobs.
+- **`OpenAIReservoirOperator`** — OpenAI Chat Completions operator specifically for logprobs extraction (OpenAI's Chat Completions API supports `top_logprobs` up to 5).
+- **`build_operator()`** — Factory that selects the right operator class based on `ResolvedModelConfig`.
+
+### Prompt Construction
+
+All prompt text lives in [resllm/src/prompts.py](resllm/src/prompts.py) as template constants. Builder functions (`build_system_message`, `build_instructions`, `build_observation`) compose the final prompt from reservoir state and config. Ollama models receive an additional JSON instruction suffix since they use JSON mode rather than structured output schemas.
 
 ---
 

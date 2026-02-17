@@ -3,35 +3,48 @@
 """
 resllm.operator
 
-Defines the Operator agent for reservoir management decisions. Uses a language
-model to compute monthly percent-allocation release decisions based on
-current storage, inflows, and remaining demand.
-
+Defines the Operator agent for reservoir management decisions. Uses native
+provider APIs to compute monthly percent-allocation release decisions based
+on current storage, inflows, and remaining demand.
 """
+from __future__ import annotations
+
 import json
+import math
+import os
+import re
+from typing import NamedTuple, TypedDict
+
 import pandas as pd
-from types import SimpleNamespace
-from agno.agent import Agent, RunOutput
-from agno.db.sqlite import SqliteDb
-from textwrap import dedent
+from openai import OpenAI
 from pydantic import BaseModel, Field
-from typing import Optional
-from typing_extensions import TypedDict
 
 from src.prompts import (
-    build_system_message,
+    OLLAMA_JSON_INSTRUCTION,
     build_instructions,
     build_observation,
-    DOUBLE_CHECK_PROMPT,
-    OLLAMA_JSON_INSTRUCTION,
+    build_system_message,
 )
 
 
+# =============================================================================
+# Data Models
+# =============================================================================
+
+# Canonical concept key list — single source of truth used by the fuzzy
+# matcher, the TypedDict, and the Ollama JSON instruction prompt.
+CONCEPT_KEYS: tuple[str, ...] = (
+    "environment_setting", "goal", "operational_limits",
+    "average_cumulative_inflow_by_month", "average_remaining_demand_by_month",
+    "previous_allocation", "current_month", "current_storage",
+    "current_cumulative_observed_inflow", "current_water_year_remaining_demand",
+    "next_water_year_demand", "mean_forecast", "percentile_forecast_10th",
+    "percentile_forecast_90th", "puppies",
+)
+
 
 class OperationalConcepts(TypedDict):
-    """
-    Dictionary for importance of operational concepts related to reservoir management.
-    """
+    """Importance rankings for operational concepts (0–4 scale)."""
 
     environment_setting: int
     goal: int
@@ -51,176 +64,88 @@ class OperationalConcepts(TypedDict):
 
 
 class AllocationDecision(BaseModel):
-    """
-    Pydantic model for the demand release decision.
-    """
+    """Pydantic model for the demand release decision."""
 
     allocation_reasoning: str = Field(
         ...,
-        description=dedent("A brief justification of the percent allocation decision."),
+        description="A brief justification of the percent allocation decision.",
     )
     allocation_percent: float = Field(
         ...,
-        description=dedent("The percent allocation decision (from 0-100 percent) which continues or updates the allocation and release from the reservoir."),
+        description=(
+            "The percent allocation decision (from 0-100 percent) which "
+            "continues or updates the allocation and release from the reservoir."
+        ),
     )
-
     allocation_concept_importance: OperationalConcepts
 
 
-class ReservoirAllocationOperator:
-    """
-    Water reservoir agent that uses a language model to determine reservoir operating decisions.
-    """
+class DecisionResult(NamedTuple):
+    """Return type for ``make_allocation_decision``."""
+
+    allocation_percent: float
+    justification: str
+    concept_importance: dict[str, int]
+
+
+# =============================================================================
+# Base Operator
+# =============================================================================
+
+class BaseReservoirOperator:
+    """Base class with shared functionality for reservoir operators."""
 
     def __init__(
         self,
-        model_and_version: list = [],
-        reservoir=None,
-        include_double_check: bool = False,
-        include_num_history: int = 0,
+        reservoir,
+        model_id: str,
+        *,
         include_red_herring: bool = False,
-        debug_response: bool = False,
-        use_ollama_native: bool | None = None,
-        agent_kwargs: dict = {},
-        model_kwargs: dict = {},
     ):
-        """
-        Initializes the water reservoir agent.
-        Parameters:
-            model_and_version (list): A list containing the language model type and version.
-            reservoir: The reservoir instance to be used.
-            agent_kwargs (dict): Additional arguments for the agent.
-            model_kwargs (dict): Additional arguments for the model.
-        """
-        # - reservoir
         if reservoir is None:
             raise ValueError("reservoir cannot be None")
         self.reservoir = reservoir
-
-        # - double check
-        self.include_double_check = include_double_check
-
-        # - num history
-        self.include_num_history = include_num_history + 1 if include_double_check else include_num_history
-
-        # - include red herring
-        self.include_red_herring = include_red_herring
-
-        # - debug response
-        self.debug_response = debug_response
-
-        # - model identifiers
-        self.model_server = model_and_version[0] if model_and_version else None
-        self.model_id = model_and_version[1] if len(model_and_version) > 1 else None
-        self.model_kwargs = model_kwargs
-        if use_ollama_native is None:
-            self.use_ollama_native = (
-                self.model_server == "Ollama" and bool(self.model_kwargs.get("think"))
-            )
-        else:
-            self.use_ollama_native = use_ollama_native
-
-        # - model
-        if model_and_version[0] == "OpenAI":
-            from agno.models.openai.responses import OpenAIResponses
-            self.model = OpenAIResponses(id=model_and_version[1], **model_kwargs)
-        
-        elif model_and_version[0] == "xAI":
-            from agno.models.xai import xAI
-            self.model = xAI(id=model_and_version[1], **model_kwargs)
-
-        elif model_and_version[0] == "Google":
-            from agno.models.google import Gemini
-            self.model = Gemini(id=model_and_version[1], **model_kwargs)
-
-        elif model_and_version[0] == "Ollama":
-            from agno.models.ollama import Ollama
-            self.model = Ollama(id=model_and_version[1], options=model_kwargs)
-
-        elif model_and_version[0] == "Mistral":
-            from agno.models.mistral import MistralChat
-            self.model = MistralChat(id=model_and_version[1], **model_kwargs)
-
-        # - system message
-        self.system_message = build_system_message(model_and_version[1])
-
-        # - instruction message
-        self.instructions = build_instructions(reservoir, self.include_red_herring)
-
-        # = response model
-        self.response_model = AllocationDecision
-        use_json_mode = True if model_and_version[0] == "Ollama" else False
-        
-        # - agent
-        self.agent: Agent = Agent(
-            model=self.model,
-            description=self.system_message,
-            instructions=self.instructions,
-            output_schema=self.response_model,
-            use_json_mode=use_json_mode,
-            db=SqliteDb(db_file=("./agent.db")) if self.include_num_history > 0 else None,
-            add_history_to_context=True if self.include_num_history > 0 else False,
-            num_history_runs=self.include_num_history if self.include_num_history > 0 else None,
-            **agent_kwargs,
-        )
-
+        self.system_message = build_system_message(model_id)
+        self.instructions = build_instructions(reservoir, include_red_herring)
+        self.observation: str | None = None
         self.record = pd.DataFrame()
+
+    # --------------------------------------------------------------------- #
+    # Observation
+    # --------------------------------------------------------------------- #
 
     def set_observation(
         self,
-        idx: int = 0,
-        date: Optional[pd.Timestamp] = None,
-        wy: Optional[int] = None,
-        mowy: Optional[int] = None,
-        dowy: Optional[int] = None,
-        alloc_1: Optional[float] = None,
-        st_1: Optional[float] = None,
-        qwyaccum: Optional[float] = None,
-        d_wy_rem: Optional[float] = None,
-        qwy_forecast_mean: Optional[float] = None,
-        qwy_forecast_10: Optional[float] = None,
-        qwy_forecast_90: Optional[float] = None,
+        idx: int,
+        date: pd.Timestamp,
+        wy: int,
+        mowy: int,
+        dowy: int,
+        alloc_1: float,
+        st_1: float,
     ):
-        """
-        Generates a monthly water suuply allocation decision based on the current state of the reservoir and water demand.
-        """
-        # get inflow and demand data if date specific
-        if date is not None:
-            inflows = self.reservoir.inflows.copy()
+        """Compute observation data from the reservoir and build the prompt."""
+        d_wy_rem = int(self.reservoir.demand[(dowy - 1):].sum())
 
-            # get the remaining demand for the water year
-            d_wy_rem = int(self.reservoir.demand[(dowy - 1) :].sum())
+        qwyaccum = 0
+        if dowy > 0:
+            inflows = self.reservoir.inflows
+            qwyaccum = int(
+                inflows.loc[inflows["water_year"] == wy, "inflow"]
+                .values[0:(dowy - 1)]
+                .sum()
+            )
 
-            # get cumulative water year inflow
-            if dowy == 0:
-                qwyaccum = 0
-            else:
-                qwyaccum = int(
-                    inflows.loc[(inflows["water_year"] == wy), "inflow"]
-                    .values[0 : (dowy - 1)]
-                    .sum()
-                )
+        qwy_forecast_mean = qwy_forecast_10 = qwy_forecast_90 = None
+        if self.reservoir.characteristics["wy_forecast_file"] is not False:
+            fc = self.reservoir.forecasted_inflows
+            row = fc.loc[fc["date"] == date]
+            qwy_forecast_mean = int(row["QCYFHM"].values[0])
+            qwy_forecast_10 = int(row["QCYFH1"].values[0])
+            qwy_forecast_90 = int(row["QCYFH9"].values[0])
 
-            # get the forecasted inflows
-            if self.reservoir.characteristics["wy_forecast_file"] is not False:
-                qwy_forecast_mean = int(
-                    self.reservoir.forecasted_inflows.loc[
-                        (self.reservoir.forecasted_inflows["date"] == date), "QCYFHM"
-                    ].values[0]
-                )
-                qwy_forecast_10 = int(
-                    self.reservoir.forecasted_inflows.loc[
-                        (self.reservoir.forecasted_inflows["date"] == date), "QCYFH1"
-                    ].values[0]
-                )
-                qwy_forecast_90 = int(
-                    self.reservoir.forecasted_inflows.loc[
-                        (self.reservoir.forecasted_inflows["date"] == date), "QCYFH9"
-                    ].values[0]
-                )
-
-        # set the observation string using the prompts module
         next_wy_demand = int(self.reservoir.demand[0:90].sum()) if mowy >= 9 else None
+
         self.observation = build_observation(
             mowy=mowy,
             st_1=st_1,
@@ -233,7 +158,6 @@ class ReservoirAllocationOperator:
             next_wy_demand=next_wy_demand,
         )
 
-        # record the observation in the decision output
         self.record.loc[idx, "date"] = date
         self.record.loc[idx, "wy"] = wy
         self.record.loc[idx, "mowy"] = mowy
@@ -242,291 +166,869 @@ class ReservoirAllocationOperator:
         self.record.loc[idx, "d_wy_rem"] = d_wy_rem
         self.record.loc[idx, "st_1"] = st_1
 
-    def make_allocation_decision(self, idx: int = 0):
-        """
-        Makes a demand release decision based on the current state of the reservoir and water demand.
-        """
-        # run the agent
-        if self.model_server == "Ollama" and self.use_ollama_native:
-            content_obj, thinking_text, raw_text = self._run_ollama_native(self.observation)
-            self.response = SimpleNamespace(
-                content=content_obj,
-                reasoning_content=thinking_text,
-                raw_text=raw_text,
-                model_provider="Ollama",
-            )
-        else:
-            content = None
-            attempts = 0
-            while (content is None or isinstance(content, str)) and attempts < 3:
-                self.response: RunOutput = self.agent.run(self.observation)
-                content = self.response.content
-                attempts += 1
-                if attempts == 3:
-                    raise Exception(f"{self.model.provider} API call failed after 3 attempts")
-            
-            if self.include_double_check:
-                self.response: RunOutput = self.agent.run(DOUBLE_CHECK_PROMPT)
-                content = self.response.content
+    # --------------------------------------------------------------------- #
+    # Decision helpers
+    # --------------------------------------------------------------------- #
 
-        # get the decision output
-        if self.response is None or self.response.content is None:
-            raise ValueError("No response received from agent")
+    @staticmethod
+    def _normalize_allocation_percent(value: float) -> float:
+        """Clamp allocation to 0–100, treating 0 < value < 1 as a fraction."""
+        if 0 < value < 1:
+            value *= 100
+        return max(0.0, min(100.0, value))
 
-        allocation_percent = self.response.content.allocation_percent
-        # keep decision within bounds
-        if allocation_percent < 0:
-            allocation_percent = 0
-        elif allocation_percent > 0 and allocation_percent < 1:
-            allocation_percent = allocation_percent * 100
-        elif allocation_percent > 100:
-            allocation_percent = 100
-
-        # record the observation
+    def _record_decision(self, idx: int, allocation_percent: float, decision: AllocationDecision):
+        """Record the allocation decision and concept importance."""
         self.record.loc[idx, "observation"] = self.system_message + self.instructions + self.observation
-
-        # capture reasoning content if provided by agno
-        self.last_reasoning = getattr(self.response, "reasoning_content", None)
-        if self.model_server == "Google":
-            gemini_thoughts = self._extract_gemini_thought_summary(self.response)
-            if gemini_thoughts:
-                self.last_reasoning = gemini_thoughts
-
-        # optionally capture the raw response for inspection
-        if self.debug_response:
-            self.record.loc[idx, "response_debug"] = self._serialize_response(self.response)
-
-        # record the allocation percent
         self.record.loc[idx, "allocation_percent"] = allocation_percent
+        self.record.loc[idx, "allocation_justification"] = decision.allocation_reasoning
+        for key, value in decision.allocation_concept_importance.items():
+            self.record.loc[idx, key] = value
 
-        # record the allocation justification
-        allocation_justification = dedent(
-            self.response.content.allocation_reasoning
-        )
-        self.record.loc[idx, "allocation_justification"] = allocation_justification
-        allocation_concept_importance = (
-            self.response.content.allocation_concept_importance
+    def act(self, allocation_percent: float, idx: int = 0):
+        """Execute the allocation decision (updates reservoir state)."""
+        release = self.reservoir.demand[idx] * allocation_percent / 100
+        self.record.loc[idx, "release"] = release
+
+    def pop_logprobs_record(self) -> pd.DataFrame:
+        """Return and clear accumulated logprobs records.
+
+        Subclasses that populate ``self.logprobs_record`` get real data;
+        the base class returns an empty DataFrame.
+        """
+        df = getattr(self, "logprobs_record", pd.DataFrame()).copy()
+        self.logprobs_record = pd.DataFrame()
+        return df
+
+
+# =============================================================================
+# Provider call helpers
+# =============================================================================
+
+_MAX_RETRIES = 3
+
+# xAI and Mistral use an OpenAI-compatible endpoint
+_XAI_BASE_URL = "https://api.x.ai/v1"
+_MISTRAL_BASE_URL = "https://api.mistral.ai/v1"
+
+
+def _call_openai_responses(
+    client: OpenAI,
+    model: str,
+    system_content: str,
+    user_content: str,
+    schema: dict,
+    temperature: float | None,
+    reasoning: dict,
+) -> tuple[AllocationDecision, str | None]:
+    """Call OpenAI Responses API with reasoning support.
+
+    The Responses API (``/v1/responses``) is the only OpenAI endpoint that
+    accepts the ``reasoning`` parameter (with ``summary``).
+
+    Returns:
+        (AllocationDecision, reasoning_text_or_None)
+    """
+    resp_params: dict = {
+        "model": model,
+        "instructions": system_content,
+        "input": [{"role": "user", "content": user_content}],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "allocation_decision",
+                "strict": True,
+                "schema": schema,
+            },
+        },
+        "reasoning": reasoning,
+    }
+    if temperature is not None:
+        resp_params["temperature"] = temperature
+
+    response = client.responses.create(**resp_params)
+
+    # Extract structured output text and reasoning summaries
+    response_text: str | None = None
+    reasoning_text: str | None = None
+    for item in response.output:
+        if item.type == "message":
+            for content in item.content:
+                if content.type == "output_text":
+                    response_text = content.text
+        elif item.type == "reasoning":
+            summaries = []
+            for s in getattr(item, "summary", []):
+                if hasattr(s, "text"):
+                    summaries.append(s.text)
+            if summaries:
+                reasoning_text = "\n".join(summaries)
+
+    if response_text is None:
+        raise ValueError("No output text in Responses API response")
+
+    return AllocationDecision(**json.loads(response_text)), reasoning_text
+
+
+def _call_openai_compatible(
+    client: OpenAI,
+    model: str,
+    system_content: str,
+    user_content: str,
+    temperature: float | None,
+    reasoning: dict | None = None,
+) -> tuple[AllocationDecision, str | None]:
+    """Call an OpenAI-compatible API with structured JSON output.
+
+    Works for OpenAI, xAI, and Mistral (all expose an OpenAI-compatible
+    chat completions endpoint).
+
+    For **OpenAI** with reasoning enabled, uses the **Responses API**
+    (``/v1/responses``) which supports the ``reasoning`` parameter and
+    returns reasoning summaries.  For xAI / Mistral (or OpenAI without
+    reasoning), falls back to **Chat Completions** with ``reasoning_effort``.
+
+    Returns:
+        (AllocationDecision, reasoning_text_or_None)
+    """
+    schema = AllocationDecision.model_json_schema()
+    _add_strict_additional_properties(schema)
+
+    # ------------------------------------------------------------------
+    # OpenAI Responses API path (supports reasoning traces)
+    # ------------------------------------------------------------------
+    is_openai_native = (
+        client.base_url is not None
+        and "api.openai.com" in str(client.base_url)
+    )
+    if is_openai_native and reasoning is not None:
+        return _call_openai_responses(
+            client, model, system_content, user_content, schema,
+            temperature, reasoning,
         )
 
+    # ------------------------------------------------------------------
+    # Chat Completions path (xAI, Mistral, or OpenAI without reasoning)
+    # ------------------------------------------------------------------
+    messages = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": user_content},
+    ]
+
+    api_params: dict = {
+        "model": model,
+        "messages": messages,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "allocation_decision",
+                "strict": True,
+                "schema": schema,
+            },
+        },
+    }
+    if temperature is not None:
+        api_params["temperature"] = temperature
+
+    completion = client.chat.completions.create(**api_params)
+    response_text = completion.choices[0].message.content
+    return AllocationDecision(**json.loads(response_text)), None
+
+
+def _call_google(
+    model_id: str,
+    system_content: str,
+    user_content: str,
+    model_kwargs: dict,
+) -> tuple[AllocationDecision, str | None]:
+    """Call Google Gemini with structured JSON output.
+
+    Returns:
+        (AllocationDecision, thinking_text_or_None)
+    """
+    from google import genai
+    from google.genai import types
+
+    api_key = model_kwargs.get("api_key") or os.getenv("GOOGLE_API_KEY")
+    client = genai.Client(api_key=api_key)
+
+    config_args: dict = {
+        "response_mime_type": "application/json",
+        "response_schema": AllocationDecision,
+        "system_instruction": system_content,
+    }
+
+    if model_kwargs.get("temperature") is not None:
+        config_args["temperature"] = model_kwargs["temperature"]
+
+    # Thinking support
+    include_thoughts = model_kwargs.get("include_thoughts", False)
+    if include_thoughts:
+        thinking_kwargs: dict = {"include_thoughts": True}
+        thinking_level = model_kwargs.get("thinking_level")
+        if thinking_level:
+            thinking_level_map = {
+                "none": types.ThinkingLevel.THINKING_LEVEL_UNSPECIFIED,
+                "minimal": types.ThinkingLevel.MINIMAL,
+                "low": types.ThinkingLevel.LOW,
+                "medium": types.ThinkingLevel.MEDIUM,
+                "high": types.ThinkingLevel.HIGH,
+            }
+            thinking_kwargs["thinking_level"] = thinking_level_map.get(
+                thinking_level, types.ThinkingLevel.HIGH
+            )
+        config_args["thinking_config"] = types.ThinkingConfig(**thinking_kwargs)
+
+    response = client.models.generate_content(
+        model=model_id,
+        contents=user_content,
+        config=types.GenerateContentConfig(**config_args),
+    )
+
+    decision: AllocationDecision = response.parsed
+
+    # Extract thinking content
+    thinking_text: str | None = None
+    if include_thoughts and response.candidates:
+        thought_parts: list[str] = []
+        for part in response.candidates[0].content.parts:
+            if getattr(part, "thought", False) and part.text:
+                thought_parts.append(part.text.strip())
+        if thought_parts:
+            thinking_text = "\n".join(thought_parts)
+
+    return decision, thinking_text
+
+
+def _call_ollama(
+    model_id: str,
+    system_content: str,
+    user_content: str,
+    model_kwargs: dict,
+    *,
+    top_logprobs: int | None = None,
+) -> tuple[AllocationDecision, str, str, list | None]:
+    """Call Ollama with JSON format, optional thinking, and optional logprobs.
+
+    When *top_logprobs* is not ``None`` the call is **non-streaming** so that
+    the full logprobs array is returned on the response object.
+
+    Returns:
+        (AllocationDecision, thinking_text, raw_content_text, logprobs_data)
+    """
+    from ollama import chat
+
+    system_prompt = f"{system_content}{OLLAMA_JSON_INSTRUCTION}"
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+    # think can be bool or str ("minimal", "low", "medium", "high")
+    think: bool | str = model_kwargs.get("think", True)
+    options = {k: v for k, v in model_kwargs.items() if k == "temperature"}
+
+    if top_logprobs is not None:
+        # Non-streaming path — logprobs are only available on the full response
+        chat_kwargs: dict = {
+            "model": model_id,
+            "messages": messages,
+            "think": think,
+            "stream": False,
+            "format": "json",
+            "logprobs": True,
+            "top_logprobs": top_logprobs,
+        }
+        if options:
+            chat_kwargs["options"] = options
+
+        response = chat(**chat_kwargs)
+
+        raw_text = (getattr(response.message, "content", None) or "").strip()
+        thinking_text = (getattr(response.message, "thinking", None) or "").strip()
+        logprobs_data = getattr(response, "logprobs", None)
+
+        decision = _parse_ollama_decision(raw_text)
+        return decision, thinking_text, raw_text, logprobs_data
+
+    # Streaming path — captures thinking traces chunk-by-chunk
+    thinking_parts: list[str] = []
+    content_parts: list[str] = []
+    for chunk in chat(
+        model=model_id,
+        messages=messages,
+        think=think,
+        stream=True,
+        options=options or None,
+        format="json",
+    ):
+        msg = getattr(chunk, "message", None)
+        if msg is None:
+            continue
+        if t := getattr(msg, "thinking", None):
+            thinking_parts.append(t)
+        if c := getattr(msg, "content", None):
+            content_parts.append(c)
+
+    thinking_text = "".join(thinking_parts).strip()
+    raw_text = "".join(content_parts).strip()
+
+    decision = _parse_ollama_decision(raw_text)
+    return decision, thinking_text, raw_text, None
+
+
+def _parse_ollama_decision(raw_text: str) -> AllocationDecision:
+    """Parse and normalize an Ollama JSON response into an AllocationDecision."""
+    payload = _parse_json_response(raw_text)
+    payload = _normalize_ollama_payload(payload)
+    return AllocationDecision(**payload)
+
+
+# =============================================================================
+# Ollama response normalization (module-level for reuse)
+# =============================================================================
+
+def _parse_json_response(raw_text: str) -> dict:
+    """Parse JSON from model response, handling markdown fences and extra text."""
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        pass
+
+    cleaned = raw_text.strip()
+
+    # Strip markdown code fences
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        lines = lines[1:] if lines[0].startswith("```") else lines
+        lines = lines[:-1] if lines and lines[-1].strip() == "```" else lines
+        cleaned = "\n".join(lines).strip()
+
+    # Extract JSON object if surrounded by other text
+    if not cleaned.lstrip().startswith("{"):
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start != -1 and end > start:
+            cleaned = cleaned[start:end + 1]
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Model returned non-JSON content: {raw_text[:500]}") from exc
+
+
+def _normalize_ollama_payload(payload: dict) -> dict:
+    """Normalize Ollama JSON keys to expected AllocationDecision fields."""
+    if not isinstance(payload, dict):
+        return payload
+
+    # camelCase → snake_case
+    key_map = {
+        "allocationReasoning": "allocation_reasoning",
+        "allocationPercent": "allocation_percent",
+        "allocationConceptImportance": "allocation_concept_importance",
+    }
+    normalized = {key_map.get(k, k): v for k, v in payload.items()}
+
+    # Unwrap if model wrapped response in a single key
+    expected_fields = {"allocation_reasoning", "allocation_percent", "allocation_concept_importance"}
+    if not (expected_fields & normalized.keys()):
+        if len(normalized) == 1:
+            inner = next(iter(normalized.values()))
+            if isinstance(inner, dict):
+                return _normalize_ollama_payload(inner)
+
+    # Normalize concept importance keys
+    aci = normalized.get("allocation_concept_importance")
+    if isinstance(aci, dict):
+        normalized["allocation_concept_importance"] = _normalize_concept_keys(aci)
+
+    return normalized
+
+
+def _normalize_concept_keys(aci: dict) -> dict:
+    """Fuzzy-match concept importance keys to expected field names."""
+    expected = set(CONCEPT_KEYS)
+
+    # Fast path: keys already match
+    if set(aci.keys()) == expected:
+        return aci
+
+    patterns = [
+        (("environment",),                   "environment_setting"),
+        (("goal",),                          "goal"),
+        (("operational", "limit"),            "operational_limits"),
+        (("average", "cumulative", "inflow"), "average_cumulative_inflow_by_month"),
+        (("average", "remaining", "demand"),  "average_remaining_demand_by_month"),
+        (("previous", "allocation"),          "previous_allocation"),
+        (("current", "month"),                "current_month"),
+        (("current", "storage"),              "current_storage"),
+        (("current", "cumulative", "inflow"), "current_cumulative_observed_inflow"),
+        (("current", "remaining", "demand"),  "current_water_year_remaining_demand"),
+        (("next", "water", "demand"),         "next_water_year_demand"),
+        (("mean", "forecast"),                "mean_forecast"),
+        (("10", "percent"),                   "percentile_forecast_10th"),
+        (("90", "percent"),                   "percentile_forecast_90th"),
+        (("pupp",),                           "puppies"),
+    ]
+
+    mapping: dict[str, int] = {}
+    for raw_key, value in aci.items():
+        normalized_key = " ".join(str(raw_key).strip().lower().replace("_", " ").split())
+        for keywords, target in patterns:
+            if all(kw in normalized_key for kw in keywords):
+                mapping[target] = value
+                break
+
+    for key in expected:
+        mapping.setdefault(key, 0)
+
+    return mapping
+
+
+# =============================================================================
+# Multi-Provider Operator (direct API calls)
+# =============================================================================
+
+class ReservoirAllocationOperator(BaseReservoirOperator):
+    """LLM reservoir operator using native provider APIs."""
+
+    def __init__(
+        self,
+        model_server: str,
+        model_id: str,
+        reservoir=None,
+        *,
+        include_red_herring: bool = False,
+        debug_response: bool = False,
+        model_kwargs: dict | None = None,
+        top_logprobs: int | None = None,
+    ):
+        """Initialize the multi-provider reservoir operator.
+
+        Args:
+            model_server: Provider name (OpenAI, Google, Ollama, xAI, Mistral).
+            model_id: Model identifier string.
+            reservoir: Reservoir simulation instance.
+            include_red_herring: Whether to include ablation text in instructions.
+            debug_response: Capture raw model response payloads for inspection.
+            model_kwargs: Provider-specific model keyword arguments.
+            top_logprobs: Number of top logprobs to request, or None to disable.
+        """
+        super().__init__(reservoir, model_id, include_red_herring=include_red_herring)
+
+        self.model_server = model_server
+        self.model_id = model_id
+        self.model_kwargs = model_kwargs or {}
+        self.debug_response = debug_response
+        self.top_logprobs = top_logprobs
+        self.logprobs_record = pd.DataFrame()
+
+        # Pre-build OpenAI-compatible client for providers that use it
+        if model_server in ("OpenAI", "xAI", "Mistral"):
+            client_kwargs: dict = {}
+            if model_server == "OpenAI":
+                client_kwargs["api_key"] = self.model_kwargs.get("api_key") or os.getenv("OPENAI_API_KEY")
+            elif model_server == "xAI":
+                client_kwargs["api_key"] = self.model_kwargs.get("api_key") or os.getenv("XAI_API_KEY")
+                client_kwargs["base_url"] = _XAI_BASE_URL
+            elif model_server == "Mistral":
+                client_kwargs["api_key"] = self.model_kwargs.get("api_key") or os.getenv("MISTRAL_API_KEY")
+                client_kwargs["base_url"] = _MISTRAL_BASE_URL
+            self._openai_client = OpenAI(**client_kwargs)
+
+    # --------------------------------------------------------------------- #
+    # Decision
+    # --------------------------------------------------------------------- #
+
+    def make_allocation_decision(self, idx: int = 0) -> DecisionResult:
+        """Make a monthly allocation decision via the language model."""
+        system_content = f"{self.system_message}\n\n{self.instructions}"
+
+        decision: AllocationDecision
+        reasoning_text: str | None = None
+
+        if self.model_server in ("OpenAI", "xAI", "Mistral"):
+            decision, reasoning_text = self._call_openai_compat(system_content)
+        elif self.model_server == "Google":
+            decision, reasoning_text = _call_google(
+                self.model_id, system_content, self.observation, self.model_kwargs,
+            )
+        elif self.model_server == "Ollama":
+            decision, thinking, _raw, logprobs_data = _call_ollama(
+                self.model_id, system_content, self.observation, self.model_kwargs,
+                top_logprobs=self.top_logprobs,
+            )
+            reasoning_text = thinking or None
+        else:
+            raise ValueError(f"Unsupported model server: {self.model_server}")
+
+        allocation_percent = self._normalize_allocation_percent(decision.allocation_percent)
+        self._record_decision(idx, allocation_percent, decision)
+
+        self.last_reasoning = reasoning_text or "N/A"
         self.record.loc[idx, "model_reasoning"] = self.last_reasoning
-        for k, v in allocation_concept_importance.items():
-            self.record.loc[idx, k] = v
 
-        return (
+        if self.debug_response:
+            self.record.loc[idx, "response_debug"] = json.dumps(
+                _to_serializable(decision), ensure_ascii=False,
+            )
+
+        # Ollama logprobs extraction
+        if self.model_server == "Ollama" and self.top_logprobs is not None and logprobs_data:
+            row = _extract_logprobs_row(logprobs_data, idx)
+            if row is not None:
+                self.logprobs_record = pd.concat(
+                    [self.logprobs_record, pd.DataFrame([row])], ignore_index=True,
+                )
+
+        return DecisionResult(
             allocation_percent,
-            allocation_justification,
-            allocation_concept_importance,
+            decision.allocation_reasoning,
+            decision.allocation_concept_importance,
         )
 
-    def _run_ollama_native(self, observation: str):
-        """
-        Use native Ollama chat to capture thinking traces when available.
-        Returns: (AllocationDecision, thinking_text, raw_text)
-        """
-        from ollama import chat
+    def _call_openai_compat(self, system_content: str) -> tuple[AllocationDecision, str | None]:
+        """Call OpenAI-compatible provider with retries."""
+        reasoning = self.model_kwargs.get("reasoning")
+        temperature = self.model_kwargs.get("temperature")
+        last_err: Exception | None = None
 
-        system_prompt = f"{self.system_message}{self.instructions}{OLLAMA_JSON_INSTRUCTION}"
+        for _ in range(_MAX_RETRIES):
+            try:
+                decision, reasoning_text = _call_openai_compatible(
+                    self._openai_client,
+                    self.model_id,
+                    system_content,
+                    self.observation,
+                    temperature=temperature,
+                    reasoning=reasoning,
+                )
+                return decision, reasoning_text
+            except Exception as e:
+                last_err = e
+
+        raise RuntimeError(
+            f"{self.model_server} API call failed after {_MAX_RETRIES} attempts"
+        ) from last_err
+
+
+# =============================================================================
+# OpenAI Logprobs Operator
+# =============================================================================
+
+_MAX_CHAT_TOP_LOGPROBS = 5  # Chat Completions API ceiling
+
+
+class OpenAIReservoirOperator(BaseReservoirOperator):
+    """OpenAI Chat Completions operator with logprobs extraction support."""
+
+    def __init__(
+        self,
+        model: str,
+        reservoir=None,
+        temperature: float = 1.0,
+        api_key: str | None = None,
+        top_logprobs: int | None = None,
+        include_red_herring: bool = False,
+    ):
+        super().__init__(reservoir, model, include_red_herring=include_red_herring)
+
+        self.model = model
+        self.temperature = temperature
+        self.top_logprobs = top_logprobs
+
+        self.client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
+        self.logprobs_record = pd.DataFrame()
+        self.response: dict | None = None
+
+    # --------------------------------------------------------------------- #
+    # Decision
+    # --------------------------------------------------------------------- #
+
+    def make_allocation_decision(self, idx: int = 0) -> DecisionResult:
+        """Make allocation decision via OpenAI Chat Completions with structured output."""
+        schema = AllocationDecision.model_json_schema()
+        _add_strict_additional_properties(schema)
+
         messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": observation},
+            {"role": "system", "content": f"{self.system_message}\n\n{self.instructions}"},
+            {"role": "user", "content": self.observation},
         ]
 
-        think = bool(self.model_kwargs.get("think", False))
-        options = {k: v for k, v in self.model_kwargs.items() if k in ("temperature",)}
+        api_params: dict = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "allocation_decision",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        }
 
-        def stream_response(msgs):
-            """Stream chat response and collect thinking/content separately."""
-            thinking, content = [], []
-            for chunk in chat(
-                model=self.model_id,
-                messages=msgs,
-                think=think,
-                stream=True,
-                options=options or None,
-                format="json",
+        if self.top_logprobs is not None:
+            api_params["logprobs"] = True
+            api_params["top_logprobs"] = min(self.top_logprobs, _MAX_CHAT_TOP_LOGPROBS)
+
+        try:
+            completion = self.client.chat.completions.create(**api_params)
+        except Exception as e:
+            err_msg = str(e).lower()
+            if self.top_logprobs is not None and (
+                "logprobs" in err_msg and ("not supported" in err_msg or "not allowed" in err_msg)
             ):
-                msg = getattr(chunk, "message", None)
-                if msg is None:
-                    continue
-                if t := getattr(msg, "thinking", None):
-                    thinking.append(t)
-                if c := getattr(msg, "content", None):
-                    content.append(c)
-            return "".join(thinking).strip(), "".join(content).strip()
+                raise SystemExit(
+                    f"\nERROR: logprobs are not supported with model '{self.model}'.\n"
+                    "This model requires a separate run without --include-logprobs to capture reasoning traces.\n"
+                    "Re-run with either:\n"
+                    "  • --include-logprobs (without reasoning) using a non-reasoning or hybrid reasoning model with reasoning set to 'none'\n"
+                    "  • --reasoning-effort high/medium/low (without --include-logprobs) for reasoning traces"
+                ) from e
+            raise
 
-        thinking_text, raw_text = stream_response(messages)
+        response_text = completion.choices[0].message.content
+        decision = AllocationDecision(**json.loads(response_text))
 
-        if self.include_double_check:
-            messages += [
-                {"role": "assistant", "content": raw_text},
-                {"role": "user", "content": DOUBLE_CHECK_PROMPT.strip()},
-            ]
-            thinking_2, raw_text = stream_response(messages)
-            if thinking_2:
-                thinking_text = f"{thinking_text}\n{thinking_2}".strip()
+        self.response = {"content": decision, "raw_completion": completion}
 
-        payload = self._parse_json_response(raw_text)
-        payload = self._normalize_ollama_payload(payload)
-        return AllocationDecision(**payload), thinking_text, raw_text
+        if self.top_logprobs is not None:
+            self._extract_logprobs(completion, idx)
 
-    def _parse_json_response(self, raw_text: str) -> dict:
-        """Parse JSON from model response, handling common formatting issues."""
-        try:
-            return json.loads(raw_text)
-        except json.JSONDecodeError:
-            pass
+        allocation_percent = self._normalize_allocation_percent(decision.allocation_percent)
+        self._record_decision(idx, allocation_percent, decision)
 
-        # Try cleaning up common issues: markdown code blocks, extra text
-        cleaned = raw_text.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.splitlines()
-            lines = lines[1:] if lines[0].startswith("```") else lines
-            lines = lines[:-1] if lines and lines[-1].strip() == "```" else lines
-            cleaned = "\n".join(lines).strip()
+        return DecisionResult(
+            allocation_percent,
+            decision.allocation_reasoning,
+            decision.allocation_concept_importance,
+        )
 
-        # Extract JSON object if surrounded by other text
-        if not cleaned.lstrip().startswith("{"):
-            start, end = cleaned.find("{"), cleaned.rfind("}")
-            if start != -1 and end > start:
-                cleaned = cleaned[start:end + 1]
+    # --------------------------------------------------------------------- #
+    # Logprobs extraction
+    # --------------------------------------------------------------------- #
 
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Ollama returned non-JSON content: {raw_text[:500]}") from exc
-
-    def _normalize_ollama_payload(self, payload: dict) -> dict:
-        """Normalize Ollama JSON keys to expected AllocationDecision fields."""
-        if not isinstance(payload, dict):
-            return payload
-
-        # Handle camelCase to snake_case conversion
-        key_map = {
-            "allocationReasoning": "allocation_reasoning",
-            "allocationPercent": "allocation_percent",
-            "allocationConceptImportance": "allocation_concept_importance",
-        }
-        normalized = {key_map.get(k, k): v for k, v in payload.items()}
-
-        # Unwrap if model wrapped response in a single key
-        if not any(k in normalized for k in ("allocation_reasoning", "allocation_percent", "allocation_concept_importance")):
-            if len(normalized) == 1:
-                inner = next(iter(normalized.values()))
-                if isinstance(inner, dict):
-                    return self._normalize_ollama_payload(inner)
-
-        # Normalize allocation_concept_importance keys
-        aci = normalized.get("allocation_concept_importance")
-        if isinstance(aci, dict):
-            normalized["allocation_concept_importance"] = self._normalize_concept_keys(aci)
-
-        return normalized
-
-    def _normalize_concept_keys(self, aci: dict) -> dict:
-        """Fuzzy-match concept importance keys to expected field names."""
-        expected_keys = {
-            "environment_setting", "goal", "operational_limits",
-            "average_cumulative_inflow_by_month", "average_remaining_demand_by_month",
-            "previous_allocation", "current_month", "current_storage",
-            "current_cumulative_observed_inflow", "current_water_year_remaining_demand",
-            "next_water_year_demand", "mean_forecast", "percentile_forecast_10th",
-            "percentile_forecast_90th", "puppies",
-        }
-
-        # If keys already match, return as-is
-        if set(aci.keys()) == expected_keys:
-            return aci
-
-        # Fuzzy matching patterns: (keywords_to_match, target_key)
-        patterns = [
-            (("environment",), "environment_setting"),
-            (("goal",), "goal"),
-            (("operational", "limit"), "operational_limits"),
-            (("average", "cumulative", "inflow"), "average_cumulative_inflow_by_month"),
-            (("average", "remaining", "demand"), "average_remaining_demand_by_month"),
-            (("previous", "allocation"), "previous_allocation"),
-            (("current", "month"), "current_month"),
-            (("current", "storage"), "current_storage"),
-            (("current", "cumulative", "inflow"), "current_cumulative_observed_inflow"),
-            (("current", "remaining", "demand"), "current_water_year_remaining_demand"),
-            (("next", "water", "demand"), "next_water_year_demand"),
-            (("mean", "forecast"), "mean_forecast"),
-            (("10", "percent"), "percentile_forecast_10th"),
-            (("90", "percent"), "percentile_forecast_90th"),
-            (("pupp",), "puppies"),
-        ]
-
-        def normalize_key(k: str) -> str:
-            return " ".join(str(k).strip().lower().replace("_", " ").split())
-
-        mapping = {}
-        for k, v in aci.items():
-            nk = normalize_key(k)
-            for keywords, target in patterns:
-                if all(kw in nk for kw in keywords):
-                    mapping[target] = v
-                    break
-
-        # Fill missing keys with default value
-        for key in expected_keys:
-            mapping.setdefault(key, 0)
-
-        return mapping
-
-    def _serialize_response(self, response: RunOutput) -> str:
-        """
-        Best-effort serialization of RunOutput for debugging.
-        """
-        try:
-            payload = self._response_to_serializable(response)
-            return json.dumps(payload, ensure_ascii=False)
-        except Exception:
-            return str(response)
-
-    def _response_to_serializable(self, response: RunOutput):
-        """Convert a RunOutput to JSON-serializable structures."""
-        def to_serializable(obj):
-            if obj is None:
-                return None
-            if isinstance(obj, (str, int, float, bool)):
-                return obj
-            if isinstance(obj, dict):
-                return {k: to_serializable(v) for k, v in obj.items()}
-            if isinstance(obj, (list, tuple)):
-                return [to_serializable(v) for v in obj]
-            if hasattr(obj, "model_dump"):
-                return to_serializable(obj.model_dump())
-            if hasattr(obj, "__dict__"):
-                return to_serializable(obj.__dict__)
-            return str(obj)
-
-        return to_serializable(response)
-
-    def _walk_payload(self, obj):
-        """Yield dict/list nodes from a nested payload structure."""
-        if isinstance(obj, dict):
-            yield obj
-            for v in obj.values():
-                yield from self._walk_payload(v)
-        elif isinstance(obj, list):
-            for item in obj:
-                yield from self._walk_payload(item)
-
-    def _extract_gemini_thought_summary(self, response: RunOutput) -> Optional[str]:
-        """Extract Gemini thought summaries from response content parts."""
-        payload = self._response_to_serializable(response)
-        summaries = []
-        for node in self._walk_payload(payload):
-            parts = node.get("parts")
-            if not isinstance(parts, list):
+    def _extract_logprobs(self, completion, idx: int):
+        """Extract logprobs for the ``allocation_percent`` numeric token."""
+        for choice in completion.choices:
+            content_logprobs = getattr(getattr(choice, "logprobs", None), "content", None)
+            if not content_logprobs:
                 continue
-            for part in parts:
-                if not isinstance(part, dict):
-                    continue
-                text = part.get("text")
-                thought_flag = part.get("thought")
-                if thought_flag and isinstance(text, str) and text.strip():
-                    summaries.append(text.strip())
-        if summaries:
-            return "\n".join(summaries)
+            row = _extract_logprobs_row(content_logprobs, idx)
+            if row is not None:
+                self.logprobs_record = pd.concat(
+                    [self.logprobs_record, pd.DataFrame([row])], ignore_index=True,
+                )
+
+
+# =============================================================================
+# Shared Utilities
+# =============================================================================
+
+def _extract_logprobs_row(
+    token_logprobs: list,
+    idx: int,
+) -> dict | None:
+    """Extract logprobs for the ``allocation_percent`` value token(s).
+
+    Works with both OpenAI and Ollama logprobs data — both expose ``.token``,
+    ``.logprob``, and ``.top_logprobs`` attributes on each token entry.
+
+    Multi-digit numbers may span multiple tokens (common with local Ollama
+    models where ``90`` → ``["9", "0"]``).  When this happens the row
+    includes ``n_value_tokens > 1``, a ``value_tokens`` JSON list, and
+    ``joint_logprob`` / ``joint_prob`` that aggregate across all tokens.
+    The per-candidate columns (``top1_*``, …) reflect the **first**
+    (most-significant-digit) token only — candidate values are the raw
+    single-digit parse since the conditional distribution of subsequent
+    digits is not observed for alternative first digits.
+
+    Returns:
+        A dict suitable for appending to a logprobs DataFrame, or ``None``
+        if the allocation_percent token could not be located.
+    """
+    match = _find_allocation_percent_tokens(token_logprobs)
+    if match is None:
         return None
+    token_positions, parsed_value = match
+
+    first_info = token_logprobs[token_positions[0]]
+    candidates = _build_candidate_list(first_info)
+
+    # Joint probability across all constituent tokens
+    value_tokens: list[str] = []
+    joint_logprob = 0.0
+    for pos in token_positions:
+        ti = token_logprobs[pos]
+        value_tokens.append(getattr(ti, "token", "") or "")
+        lp = getattr(ti, "logprob", None)
+        if lp is not None:
+            joint_logprob += lp
+
+    row: dict = {
+        "idx": idx,
+        "field_name": "allocation_percent",
+        "parsed_value": parsed_value,
+        "n_value_tokens": len(token_positions),
+        "value_tokens": json.dumps(value_tokens),
+        "joint_logprob": joint_logprob,
+        "joint_prob": _logprob_to_prob(joint_logprob),
+        "token_position": token_positions[0],
+        "token": getattr(first_info, "token", None),
+        "logprob": getattr(first_info, "logprob", None),
+        "prob": _logprob_to_prob(getattr(first_info, "logprob", None)),
+        "top_logprobs": json.dumps([{"token": c["token"], "logprob": c["logprob"]} for c in candidates]),
+        "top_candidates": json.dumps(candidates),
+    }
+
+    for c in candidates:
+        r = c["rank"]
+        row[f"top{r}_token"] = c["token"]
+        row[f"top{r}_value"] = c["value"]
+        row[f"top{r}_logprob"] = c["logprob"]
+        row[f"top{r}_prob"] = c["prob"]
+
+    return row
+
+
+def _find_allocation_percent_tokens(content_logprobs) -> tuple[list[int], float] | None:
+    """Locate all token positions and the numeric value for ``allocation_percent``.
+
+    Returns:
+        ``(token_positions, parsed_value)`` where *token_positions* is a list
+        of indices into *content_logprobs* that span the numeric value, or
+        ``None`` if the field could not be found.
+    """
+    if not content_logprobs:
+        return None
+
+    offsets: list[int] = []
+    cursor = 0
+    text_parts: list[str] = []
+    for token_info in content_logprobs:
+        token_text = (getattr(token_info, "token", None) or "")
+        offsets.append(cursor)
+        cursor += len(token_text)
+        text_parts.append(token_text)
+
+    full_text = "".join(text_parts)
+
+    # Use the LAST match — the logprobs stream may include thinking tokens
+    # where the model discusses allocation_percent before the final JSON.
+    match = None
+    for m in re.finditer(r'"allocation_percent"\s*:\s*([+-]?\d+(?:\.\d+)?)', full_text):
+        match = m
+    if match is None:
+        return None
+
+    value_char_start = match.start(1)
+    value_char_end = match.end(1)
+
+    # Collect every token that overlaps the numeric value span
+    token_positions: list[int] = []
+    for token_idx, start in enumerate(offsets):
+        end = offsets[token_idx + 1] if token_idx + 1 < len(offsets) else cursor
+        if start < value_char_end and end > value_char_start:
+            token_positions.append(token_idx)
+
+    if not token_positions:
+        return None
+
+    return token_positions, float(match.group(1))
+
+
+def _build_candidate_list(token_info) -> list[dict]:
+    """Build ranked candidate list from a token's ``top_logprobs``."""
+    top = getattr(token_info, "top_logprobs", None)
+    if not top:
+        return []
+    candidates = []
+    for rank, t in enumerate(top, start=1):
+        tok = getattr(t, "token", None)
+        num_match = re.search(r"[+-]?\d+(?:\.\d+)?", tok) if tok else None
+        candidates.append({
+            "rank": rank,
+            "token": tok,
+            "value": float(num_match.group(0)) if num_match else None,
+            "logprob": getattr(t, "logprob", None),
+            "prob": _logprob_to_prob(getattr(t, "logprob", None)),
+        })
+    return candidates
+
+
+def _to_serializable(obj):
+    """Recursively convert an object to JSON-serializable primitives."""
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, dict):
+        return {k: _to_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_serializable(v) for v in obj]
+    if hasattr(obj, "model_dump"):
+        return _to_serializable(obj.model_dump())
+    if hasattr(obj, "__dict__"):
+        return _to_serializable(obj.__dict__)
+    return str(obj)
+
+
+def _logprob_to_prob(logprob: float | None) -> float | None:
+    """Convert log-probability to probability."""
+    if logprob is None:
+        return None
+    return float(math.exp(logprob))
+
+
+def _add_strict_additional_properties(schema: dict):
+    """Recursively add ``additionalProperties: false`` to all object nodes."""
+    if isinstance(schema, dict):
+        if schema.get("type") == "object":
+            schema["additionalProperties"] = False
+        for value in schema.values():
+            _add_strict_additional_properties(value)
+    elif isinstance(schema, list):
+        for item in schema:
+            _add_strict_additional_properties(item)
+
+
+# =============================================================================
+# Factory
+# =============================================================================
+
+def build_operator(
+    resolved_model_config,
+    reservoir,
+    *,
+    include_red_herring: bool,
+    debug_response: bool,
+):
+    """Build and return the appropriate reservoir operator implementation."""
+    if resolved_model_config.top_logprobs is not None:
+        if resolved_model_config.model_server == "Ollama":
+            return ReservoirAllocationOperator(
+                model_server="Ollama",
+                model_id=resolved_model_config.model,
+                reservoir=reservoir,
+                model_kwargs=resolved_model_config.model_kwargs,
+                include_red_herring=include_red_herring,
+                debug_response=debug_response,
+                top_logprobs=resolved_model_config.top_logprobs,
+            )
+        return OpenAIReservoirOperator(
+            model=resolved_model_config.model,
+            reservoir=reservoir,
+            temperature=resolved_model_config.model_kwargs.get("temperature"),
+            api_key=resolved_model_config.model_kwargs.get("api_key") or os.getenv("OPENAI_API_KEY"),
+            top_logprobs=resolved_model_config.top_logprobs,
+            include_red_herring=include_red_herring,
+        )
+
+    return ReservoirAllocationOperator(
+        model_server=resolved_model_config.model_server,
+        model_id=resolved_model_config.model,
+        reservoir=reservoir,
+        model_kwargs=resolved_model_config.model_kwargs,
+        include_red_herring=include_red_herring,
+        debug_response=debug_response,
+    )
