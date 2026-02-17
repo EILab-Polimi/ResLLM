@@ -19,7 +19,7 @@ class Reservoir:
 
     def __init__(
         self,
-        characteristics: dict = {},
+        characteristics: dict | None = None,
     ):
         """
         Initializes the reservoir simulation.
@@ -34,6 +34,9 @@ class Reservoir:
                 - sp_to_ep (list): List of storage to elevation points.
                 - tp_to_tocs (list): List of top of conservation storage points.
         """
+
+        if characteristics is None:
+            characteristics = {}
 
         self.tocs = characteristics["tocs"]
         self.demand = np.loadtxt(characteristics["demand_file"]) # demand, TAF
@@ -200,12 +203,13 @@ class Reservoir:
             .sum()
         )
 
-        # accumulate average monthly inflows
+        # accumulate average monthly inflows in water year order (Oct–Sep)
+        wy_month_order = [10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9]
         cumulative_inflow_by_month = np.zeros(12)
         for i in range(11):
             cumulative_inflow_for_month = (
                 monthly_inflow.loc[
-                    (monthly_inflow["month"] == i + 1),
+                    (monthly_inflow["month"] == wy_month_order[i]),
                     "inflow",
                 ]
                 .mean()
