@@ -21,7 +21,6 @@ from pydantic import BaseModel, Field
 
 from src.prompts import (
     CONCEPT_KEYS,
-    MAGISTRAL_OLLAMA_SYSTEM_PREPEND,
     OLLAMA_JSON_INSTRUCTION,
     build_instructions,
     build_observation,
@@ -278,31 +277,18 @@ def _call_openai_responses(
 
 
 def _extract_think_tags(text: str) -> tuple[str, str]:
-    """Split think blocks from remaining content.
-
-    Supports both ``<think>...</think>`` and ``[THINK]...[/THINK]`` tags.
+    """Split ``<think>...</think>`` blocks from the remaining content.
 
     Returns:
         (thinking_text, remaining_content)
     """
-    if not text:
-        return "", text
-
-    pattern = re.compile(r"<think>(.*?)</think>|\[think\](.*?)\[/think\]", re.IGNORECASE | re.DOTALL)
     think_blocks: list[str] = []
     remaining = text
-    for m in pattern.finditer(text):
-        think_body = m.group(1) if m.group(1) is not None else m.group(2)
-        if think_body:
-            think_blocks.append(think_body.strip())
+    for m in re.finditer(r"<think>(.*?)</think>", text, re.DOTALL):
+        think_blocks.append(m.group(1).strip())
     if think_blocks:
-        remaining = pattern.sub("", text).strip()
+        remaining = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     return "\n\n".join(think_blocks), remaining
-
-
-def _is_magistral_ollama_model(model_id: str) -> bool:
-    """Return True when *model_id* is a magistral-family Ollama model."""
-    return "magistral" in model_id.lower()
 
 
 def _call_openai_compatible(
@@ -533,12 +519,7 @@ def _call_ollama(
     """
     from ollama import chat
 
-    system_prefix = (
-        f"{MAGISTRAL_OLLAMA_SYSTEM_PREPEND}\n\n"
-        if _is_magistral_ollama_model(model_id)
-        else ""
-    )
-    system_prompt = f"{system_prefix}{system_content}{OLLAMA_JSON_INSTRUCTION}"
+    system_prompt = f"{system_content}{OLLAMA_JSON_INSTRUCTION}"
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
@@ -568,11 +549,6 @@ def _call_ollama(
         thinking_text = (getattr(response.message, "thinking", None) or "").strip() or None
         logprobs_data = getattr(response, "logprobs", None)
 
-        extracted_thinking, cleaned_raw = _extract_think_tags(raw_text)
-        if extracted_thinking and not thinking_text:
-            thinking_text = extracted_thinking
-        raw_text = cleaned_raw
-
         decision = _parse_ollama_decision(raw_text)
         return decision, thinking_text, raw_text, logprobs_data
 
@@ -597,11 +573,6 @@ def _call_ollama(
 
     thinking_text = "".join(thinking_parts).strip() or None
     raw_text = "".join(content_parts).strip()
-
-    extracted_thinking, cleaned_raw = _extract_think_tags(raw_text)
-    if extracted_thinking and not thinking_text:
-        thinking_text = extracted_thinking
-    raw_text = cleaned_raw
 
     decision = _parse_ollama_decision(raw_text)
     return decision, thinking_text, raw_text, None
