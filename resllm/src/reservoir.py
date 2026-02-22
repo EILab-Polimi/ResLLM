@@ -25,24 +25,47 @@ class Reservoir:
         Initializes the reservoir simulation.
         Parameters:
             characteristics (dict): A dictionary containing reservoir characteristics.
+                - steps_per_year (int): Number of time steps per year.
                 - inflow_file (str): Path to the inflow data file.
                 - demand_file (str): Path to the demand data file.
-                - operable_storage_max (float): Maximum operable storage in TAF.
-                - operable_storage_min (float): Minimum operable storage in TAF.
-                - max_safe_release (float):  Maximum safe release in TAF.
+                - operable_storage_max (float): Maximum operable storage in cubic meters.
+                - operable_storage_min (float): Minimum operable storage in cubic meters.
+                - max_safe_release (float):  Maximum safe release in cubic meters.
                 - sp_to_rp (list): List of storage to release points.
                 - sp_to_ep (list): List of storage to elevation points.
                 - tp_to_tocs (list): List of top of conservation storage points.
         """
 
+        self.steps_per_year = characteristics["steps_per_year"]
+
         self.tocs = characteristics["tocs"]
-        self.demand = np.loadtxt(characteristics["demand_file"]) # demand, TAF
-        print(f"Demand data loaded: {characteristics["demand_file"]}")
-        self.inflows = pd.read_csv(characteristics["inflow_file"])  # inflow, TAF
+        self.demand = np.loadtxt(characteristics["demand_file"]) # demand, cubic meters
+        print(f"Demand data loaded: {characteristics['demand_file']}")
+
+        self.inflows = pd.read_csv(characteristics["inflow_file"])  # inflow, cubic meters
         if characteristics["wy_forecast_file"] is not False:
-            self.forecasted_inflows = pd.read_csv(characteristics["wy_forecast_file"])  # forecasted inflows, TAF
+            self.forecasted_inflows = pd.read_csv(characteristics["wy_forecast_file"])  # forecasted inflows, cubic meters
             self.forecasted_inflows["date"] = pd.to_datetime(self.forecasted_inflows["date"])
-            print(f"Forecasted inflows data loaded: {characteristics["wy_forecast_file"]}")
+            if characteristics['forecast_name'] is not False:
+                print(f"Filtering forecasted inflows for forecasts: {characteristics['forecast_name']}")
+                forecasts = characteristics['forecast_name'].split(' ')
+                accepted_columns = [
+                    col for col in self.forecasted_inflows.columns 
+                    if any(f in col for f in forecasts)
+                ]
+                self.forecasted_inflows = self.forecasted_inflows[['date'] + accepted_columns]
+                if characteristics['forecast_locations'] is not False:
+                    locations = characteristics['forecast_locations'].split(' ')
+                    selected_columns = [col for col in accepted_columns if any(loc in col for loc in locations)]
+                    selected_columns.insert(0, 'date')  # Ensure 'date' column is included
+                    self.forecasted_inflows = self.forecasted_inflows[selected_columns]
+                else:
+                    raise ValueError("Forecast locations must be provided if forecast name is specified.")
+                print(f"Forecasted inflows filtered to columns: {self.forecasted_inflows.columns.tolist()}")
+            else:
+                print("No forecast name provided; using all available forecasts.")
+            print(f"Forecasted inflows data loaded: {characteristics['wy_forecast_file']}")
+            
 
         # apply date metadata to inflow data
         self.inflows["date"] = pd.to_datetime(self.inflows["date"])
@@ -53,17 +76,25 @@ class Reservoir:
         self.inflows["dowy"] = self.inflows.apply(
             lambda row: utils.water_day(row["doy"]) + 1, axis=1
         )
-        self.inflows["week"] = self.inflows["dowy"].apply(
-            lambda x: int((x - 1) / 7) + 1
-        )
-        self.inflows.loc[
-            (self.inflows["month"] == 10) & (self.inflows["day"] == 1), "week"
-        ] = 1
-        self.inflows["water_year"] = np.where(
-            self.inflows["month"] >= 10,
-            self.inflows["year"] + 1,
-            self.inflows["year"],
-        )
+        if self.steps_per_year == 365:
+            self.inflows["week"] = self.inflows["dowy"].apply(
+                lambda x: int((x - 1) / 7) + 1
+            )
+            self.inflows.loc[
+                (self.inflows["month"] == 10) & (self.inflows["day"] == 1), "week"
+            ] = 1
+        else:
+            self.inflows["week"] = 1 # Placeholder for monthly
+
+        # Water year from Oct 1 to Sept 30
+        # self.inflows["water_year"] = np.where(
+        #     self.inflows["month"] >= 10,
+        #     self.inflows["year"] + 1,
+        #     self.inflows["year"],
+        # )
+
+        # Water year from Jan 1 to Dec 31
+        self.inflows["water_year"] = self.inflows["year"]
         self.inflows["date"] = self.inflows["date"].dt.strftime("%Y-%m-%d")
         print(f"Inflow data loaded: {characteristics["inflow_file"]}")
 
@@ -89,7 +120,7 @@ class Reservoir:
         st: float = None,
         rt: float = None,
         dt: float = None,
-        uu: float = None
+        uu: float = None,
     ):
         """
         Records the simulation output for the reservoir.
@@ -102,9 +133,9 @@ class Reservoir:
         self.record.loc[idx, "st"] = st
         self.record.loc[idx, "rt"] = rt
         self.record.loc[idx, "dt"] = dt
-        self.record.loc[idx, "uu"] = uu
+        self.record.loc[idx, "uu"] = uu 
 
-    def evaluate(self, st_1, qt, uu, tocs):
+    def evaluate(self, st_1, qt, uu, tocs, freq):
         """
         Evaluates the reservoir release and storage based on the current state, inflow,
         target release, and day of water year (DOWY).
@@ -126,7 +157,7 @@ class Reservoir:
         # constrain by TOCS
         rt = max(0.2 * (qt + st_1 - tocs), uu)
         # constrain by max safe release
-        rt = min(rt, utils.cfs_to_taf(self.compute_max_release(st_1)))
+        rt = min(rt, utils.m3s_to_m3(self.compute_max_release(st_1), freq=freq))
         # constrain by min release
         rt = min(rt, st_1 + qt)
         # add any spill
@@ -228,11 +259,58 @@ class Reservoir:
         # get annual total
         total_demand = self.demand.sum()
 
-        # subtract monthly demand from total demand
         remaining_demand_by_month = np.zeros(12)
         remaining_demand_by_month[0] = int(total_demand)
-        for i in range(11):
-            total_demand -= self.demand[30 * i : 30 * i + 30].sum()
-            remaining_demand_by_month[i + 1] = int(total_demand)
+        
+        # Logic branch based on resolution
+        if self.steps_per_year == 12:
+            # MONTHLY LOGIC
+            # Assuming self.demand is a 1D array of monthly values repeated over years
+            # We need to compute the *average* demand for month i across all years
+            
+            # Reshape demand into (Years, 12) to get monthly averages
+            # Note: This assumes self.demand length is a multiple of 12
+            num_years = len(self.demand) // 12
+            reshaped_demand = self.demand[:num_years*12].reshape((num_years, 12))
+            avg_monthly_demand = reshaped_demand.mean(axis=0)
+
+            # Note: The original function accumulates logic differently (subtracting averages)
+            # We mimic the original logic:
+            current_rem = total_demand
+            
+            # We iterate 0..10. For month i (0=Jan/Oct depending on start), we subtract that month's avg demand
+            # However, typical usage is: remaining at START of month.
+            
+            # Since self.demand is usually just one single year repeated or a timeseries,
+            # let's assume it follows the structure of the input file.
+            
+            # IF self.demand is just ONE year of data (12 values):
+            if len(self.demand) == 12:
+                 avg_monthly_demand = self.demand
+            else:
+                 # Calculate average for each month index 0..11
+                 avg_monthly_demand = [np.mean(self.demand[i::12]) for i in range(12)]
+
+            running_demand = total_demand
+            # Loop to compute remaining demand at the START of next month
+            for i in range(11):
+                # Subtract the average demand of the current month (i)
+                # Note: The original code used 30*i : 30*i+30. 
+                # This implies i=0 is the first month in the array.
+                
+                # Check mapping: In water year, i=0 is usually Oct.
+                # Assuming data is ordered by Water Year or Calendar Year consistently.
+                
+                running_demand -= avg_monthly_demand[i]
+                remaining_demand_by_month[i + 1] = int(running_demand)
+                
+        else:
+            # DAILY LOGIC (Original)
+            # Original code hardcoded 30 days. Better to be flexible, but keeping logic for 365.
+            for i in range(11):
+                # Note: This approximation (30 * i) drifts from reality (365 days).
+                # But keeping original logic for consistency if in daily mode.
+                total_demand -= self.demand[30 * i : 30 * i + 30].sum()
+                remaining_demand_by_month[i + 1] = int(total_demand)
 
         return remaining_demand_by_month

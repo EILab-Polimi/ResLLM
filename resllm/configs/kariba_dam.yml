@@ -1,0 +1,112 @@
+# config details
+config_name: "kariba_specs"
+
+reservoir:
+  # Total Storage Capacity (Dead + Live) ~ 181 BCM
+  operable_storage_max:  181321854000 
+  
+  # Minimum Operating Level (Dead Storage) ~ 116 BCM
+  operable_storage_min: 115947308000  
+  
+  # Max discharge 
+  max_safe_release: 11540 # To validate - atm 6x200 m3/s + 6x140 m3/s turbines + 9500 m3/s spillway
+  
+  sp_to_ep: [
+    [
+        0,              # Level 453
+        116000000000,   # Level 475.5 (1,16E+11)
+        118000000000,   # Level 476   (1,18E+11)
+        123000000000,   # Level 477   (1,23E+11)
+        127000000000,   # Level 478   (1,27E+11)
+        132000000000,   # Level 479   (1,32E+11)
+        137000000000,   # Level 480   (1,37E+11)
+        142000000000,   # Level 481   (1,42E+11)
+        146000000000,   # Level 482   (1,46E+11)
+        151000000000,   # Level 483   (1,51E+11)
+        157000000000,   # Level 484   (1,57E+11)
+        162000000000,   # Level 485   (1,62E+11)
+        167000000000,   # Level 486   (1,67E+11)
+        173000000000,   # Level 487   (1,73E+11)
+        181000000000,   # Level 488.5 (1,81E+11)
+        193000000000    # Level 489.5 (1,93E+11)
+    ],
+    [
+        453,
+        475.5,
+        476,
+        477,
+        478,
+        479,
+        480,
+        481,
+        482,
+        483,
+        484,
+        485,
+        486,
+        487,
+        488.5,
+        489.5
+    ]
+  ]
+  # Day of water year to TOCS (Active Storage - m3)
+  tp_to_tocs : [
+    [
+        31,  # Month 1 end
+        59,  # Month 2 end
+        90,  # Month 3 end
+        120, # Month 4 end
+        151, # Month 5 end
+        181, # Month 6 end
+        212, # Month 7 end
+        243, # Month 8 end
+        273, # Month 9 end
+        304, # Month 10 end
+        334, # Month 11 end
+        365  # Month 12 end
+    ],
+    [
+        40666000000, # Month 1 Storage
+        47696000000, # Month 2 Storage
+        60221000000, # Month 3 Storage
+        64798000000, # Month 4 Storage
+        64798000000, # Month 5 Storage
+        64798000000, # Month 6 Storage
+        61662000000, # Month 7 Storage
+        58808000000, # Month 8 Storage
+        56054000000, # Month 9 Storage
+        53788000000, # Month 10 Storage
+        50769000000, # Month 11 Storage
+        48204000000  # Month 12 Storage
+    ]
+  ]
+  
+  # Storage to max release (m3 to m3/s)
+  sp_to_rp: [
+    [
+        87640000000,    # Level 470 (Interpolated vol)
+        116000000000,   # Level 475.5
+        127000000000,   # Level 478
+        134500000000,   # Level 479.5 (Interpolated vol)
+        139500000000,   # Level 480.5 (Interpolated vol)
+        146000000000,   # Level 482
+        154000000000,   # Level 483.5 (Interpolated vol)
+        162000000000,   # Level 485
+        170000000000,   # Level 486.5 (Interpolated vol)
+        181000000000,   # Level 488.5
+        193000000000    # Level 489.5
+    ],
+    [
+        0,              # Release at 470m
+        0,              # Release at 475.5m
+        1801,           # Release at 478m
+        9459,           # Release at 479.5m
+        9694,           # Release at 480.5m
+        10018,          # Release at 482m
+        10652,          # Release at 483.5m
+        10670,          # Release at 485m
+        10969,          # Release at 486.5m
+        11539.94,       # Release at 488.5m
+        11539.94        # Release at 489.5m
+    ]
+  ]
