@@ -31,7 +31,8 @@ class Reservoir:
                 - operable_storage_max (float): Maximum operable storage in cubic meters.
                 - operable_storage_min (float): Minimum operable storage in cubic meters.
                 - max_safe_release (float):  Maximum safe release in cubic meters.
-                - sp_to_rp (list): List of storage to release points.
+                - sp_to_rp_min (list): List of storage to release points (minimum).
+                - sp_to_rp_max (list): List of storage to release points (maximum).
                 - sp_to_ep (list): List of storage to elevation points.
                 - tp_to_tocs (list): List of top of conservation storage points.
         """
@@ -135,7 +136,7 @@ class Reservoir:
         self.record.loc[idx, "dt"] = dt
         self.record.loc[idx, "uu"] = uu 
 
-    def evaluate(self, st_1, qt, uu, tocs, freq):
+    def evaluate(self, st_1, qt, uu, tocs, freq, month=None, year=None):
         """
         Evaluates the reservoir release and storage based on the current state, inflow,
         target release, and day of water year (DOWY).
@@ -157,11 +158,9 @@ class Reservoir:
         # constrain by TOCS
         rt = max(0.2 * (qt + st_1 - tocs), uu)
         # constrain by max safe release
-        rt = min(rt, utils.m3s_to_m3(self.compute_max_release(st_1), freq=freq))
+        rt = min(rt, utils.m3s_to_m3(self.compute_max_release(st_1), freq=freq, month=month, year=year))
         # constrain by min release
-        rt = min(rt, st_1 + qt)
-        # add any spill
-        rt += max(st_1 + qt - rt - K, 0)
+        rt = max(rt, utils.m3s_to_m3(self.compute_min_release(st_1), freq=freq, month=month, year=year))
         # compute ending storage
         st = st_1 + qt - rt
 
@@ -175,9 +174,35 @@ class Reservoir:
         Returns:
             float: The maximum release from the reservoir.
         """
-        sp = self.characteristics["sp_to_rp"][0]
-        rp = self.characteristics["sp_to_rp"][1]
-        return np.interp(S, sp, rp)
+        # Step 1: Interpolate current elevation from current storage volume
+        vol_array = self.characteristics["sp_to_ep"][0]
+        elev_array = self.characteristics["sp_to_ep"][1]
+        current_elevation = np.interp(S, vol_array, elev_array)
+
+        # Step 2: Interpolate max release from the calculated elevation
+        sp_elev = self.characteristics["sp_to_rp_max"][0]
+        rp_release = self.characteristics["sp_to_rp_max"][1]
+        
+        return np.interp(current_elevation, sp_elev, rp_release)
+
+    def compute_min_release(self, S):
+        """
+        Computes the minimum release from the reservoir based on the current storage.
+        Parameters:
+            S (float): The storage in the reservoir.
+        Returns:
+            float: The minimum release from the reservoir.
+        """
+       # Step 1: Interpolate current elevation from current storage volume
+        vol_array = self.characteristics["sp_to_ep"][0]
+        elev_array = self.characteristics["sp_to_ep"][1]
+        current_elevation = np.interp(S, vol_array, elev_array)
+
+        # Step 2: Interpolate min release from the calculated elevation
+        sp_elev = self.characteristics["sp_to_rp_min"][0]
+        rp_release = self.characteristics["sp_to_rp_min"][1]
+        
+        return np.interp(current_elevation, sp_elev, rp_release)
 
     def compute_tocs(self, dowy, date=None):
         """

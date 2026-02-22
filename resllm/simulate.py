@@ -69,7 +69,8 @@ class SimulationRunner:
             "max_safe_release": utils.cfs_to_taf(self.config["reservoir"]["max_safe_release"]),
             "sp_to_ep": self.config["reservoir"]["sp_to_ep"],
             "tp_to_tocs": self.config["reservoir"]["tp_to_tocs"],
-            "sp_to_rp": self.config["reservoir"]["sp_to_rp"],
+            "sp_to_rp_min": self.config["reservoir"]["sp_to_rp_min"],
+            "sp_to_rp_max": self.config["reservoir"]["sp_to_rp_max"],
             "forecast_name": self.args.forecast_name,
             "forecast_locations": self.args.forecast_locations,
         }
@@ -215,7 +216,7 @@ class SimulationRunner:
             "inflow",
         ].values[0]
 
-        rt, st = self.R1.evaluate(st_1=st_1, qt=qt, uu=uu, tocs=tocs, freq=freq[0])
+        rt, st = self.R1.evaluate(st_1=st_1, qt=qt, uu=uu, tocs=tocs, freq=freq[0], month=mowy, year=wy)
 
         if freq[0] == "M":
             dowy_rec = date(wy, mowy, 1).timetuple().tm_yday
