@@ -1,0 +1,132 @@
+
+multi_agent_system:
+  # --- Required Parameters ---
+  start_year: 1986                     # Start year of simulation (YYYY)
+  end_year: 2000                       # End year of simulation (YYYY)
+  model_server: "DeepSeek_Local"               # Model server to use (e.g., Ollama, OpenAI, xAI)
+  model: "Qwen-32B"                      # Model name/version
+
+  # --- Simulation & Data ---
+  extra_name: ""                       # Extra name to append to output files
+  steps_per_year: 12                   # Number of simulation steps per year (12 for monthly, 365 for daily)
+  nsample: 10                          # Number of simulation samples to run
+
+  
+  # --- LLM Operator Settings ---
+  reasoning_effort: "high"             # none, low, medium, high (for reasoning/hybrid models)
+  temperature: 0.1                     # Temperature for local models
+  #include_double_check: false          # Include double check on the decision
+  include_num_history: 0               # Number of historical timesteps in the context
+  include_red_herring: true            # Include red herring in the context
+  hosting_server: null                 # Base URL if using a hosted model server
+
+  # --- Execution ---
+  max_workers: 6                       # Maximum number of parallel workers (for multi-agent systems)         
+
+  system:
+    itezhitezhi:
+      # --- Initial storage & assumptions ---
+      config: "itezhitezhi_dam.yml"
+      starting_storage: 3644646451.6129    # Initial storage level for the reservoir (m3)
+
+      turbines:
+        turbine:
+          capacity: 306 #m3/s
+          efficiency: 0.89
+          head: 40.5 #m
+          quantity: 2
+ 
+      # --- Simulation & Data ---
+      demand_file: "hydro_itezhitezhi_demand.txt"            # Demand file name (in ./data)
+      inflow_file: "itezhitezhi_inflow.csv"      # Inflow file name (in ./data)
+      wy_forecast_file: "Forecasts.csv"               # Water year forecast file name (in ./data)
+      tocs: "fixed"                        # How to handle TOCS (fixed or historical)
+      forecast_name: null                  # e.g., '1a 3b'
+      forecast_locations: null             # e.g., 'Average Kafue Luangwa'
+    
+    kafuegorgeupper:
+      # --- Initial storage & assumptions ---
+      config: "kafuegorgeupper_dam.yml"
+      starting_storage: 673917419.354829   # Initial storage level for the reservoir (m3)
+
+      turbines:
+        turbine:
+          capacity: 42 #m3/s
+          efficiency: 0.61
+          head: 397 #m
+          quantity: 6
+
+      # --- Simulation & Data ---
+      demand_file: "hydro_kafuegorgeupper_demand.txt"            # Demand file name (in ./data)
+      inflow_file: "kafuegorgeupper_inflow.csv"      # Inflow file name (in ./data)
+      wy_forecast_file: "Forecasts.csv"               # Water year forecast file name (in ./data)
+      tocs: "fixed"                        # How to handle TOCS (fixed or historical)
+      forecast_name: null                  # e.g., '1a 3b'
+      forecast_locations: null             # e.g., 'Average Kafue Luangwa'
+
+    kafuegorgelower: # ???? 
+      # --- Initial storage & assumptions ---
+      config: "kafuegorgelower_dam.yml"
+      starting_storage: 673917419.354829   # Initial storage level for the reservoir (m3)
+
+      turbines:
+        turbine:
+          capacity: 97.4 #m3/s
+          efficiency: 0.88
+          head: 182.7 #m
+          quantity: 5
+
+      # --- Simulation & Data ---
+      demand_file: "hydro_kafuegorgelower_demand.txt"            # Demand file name (in ./data)
+      inflow_file: "kafuegorgelower_inflow.csv"      # Inflow file name (in ./data)
+      wy_forecast_file: "Forecasts.csv"               # Water year forecast file name (in ./data)
+      tocs: "fixed"                        # How to handle TOCS (fixed or historical)
+      forecast_name: null                  # e.g., '1a 3b'
+      forecast_locations: null             # e.g., 'Average Kafue Luangwa'
+    
+    kariba:
+      # --- Initial storage & assumptions ---
+      config: "kariba_dam.yml"
+      starting_storage: 123874072258.064   # Initial storage level for the reservoir (m3)
+
+      turbines:
+        north:
+          capacity: 200 #m3/s
+          efficiency: 0.48
+          head: 128.9 #m
+          quantity: 6
+
+        south:
+          capacity: 140 #m3/s
+          efficiency: 0.51
+          head: 128.9 #m
+          quantity: 6
+
+      # --- Simulation & Data ---
+      demand_file: "hydro_kariba_demand.txt"            # Demand file name (in ./data)
+      inflow_file: "kariba_inflow.csv"      # Inflow file name (in ./data)
+      wy_forecast_file: "Forecasts.csv"               # Water year forecast file name (in ./data)
+      tocs: "fixed"                        # How to handle TOCS (fixed or historical)
+      forecast_name: null                  # e.g., '1a 3b'
+      forecast_locations: null             # e.g., 'Average Kafue Luangwa'
+
+    cahorabassa:
+      # --- Initial storage & assumptions ---
+      config: "cahorabassa_dam.yml"
+      starting_storage: 22393561032.2581   # Initial storage level for the reservoir (m3)
+
+      turbines:
+        turbine:
+          capacity: 452 #m3/s
+          efficiency: 0.73
+          head: 128 #m
+          quantity: 5
+
+      # --- Simulation & Data ---
+      demand_file: "hydro_cahorabassa_demand.txt"            # Demand file name (in ./data)
+      inflow_file: "cahorabassa_inflow.csv"      # Inflow file name (in ./data)
+      wy_forecast_file: "Forecasts.csv"               # Water year forecast file name (in ./data)
+      tocs: "fixed"                        # How to handle TOCS (fixed or historical)
+      forecast_name: null                  # e.g., '1a 3b'
+      forecast_locations: null             # e.g., 'Average Kafue Luangwa'
+    

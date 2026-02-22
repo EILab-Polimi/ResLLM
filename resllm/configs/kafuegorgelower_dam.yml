@@ -1,0 +1,61 @@
+# config details
+config_name: "kafuegorgelower_specs"
+
+reservoir:
+  # Total Storage Capacity (Dead + Live)
+  operable_storage_max:  62840000 
+  
+  # Minimum Operating Level (Dead Storage)
+  operable_storage_min: 10950000  
+  
+  # Max discharge 
+  max_safe_release: 4445.967529 
+  sp_to_ep: [
+    [
+        0,
+        5150000,
+        10950000,
+        12930000,
+        24010000,
+        39120000,
+        59080000,
+        62840000,
+        83520000,
+        112980000
+    ],
+    [
+        503.4,  
+        518.6,
+        530,
+        533.9,
+        549.1,
+        564.4,
+        579.7,
+        582,
+        594.9,
+        610.2,
+    ]
+  ]
+  # Day of water year to TOCS (Active Storage - m3)
+  tp_to_tocs : [
+    [
+    ],
+    [
+    ]
+  ]
+  
+  # Storage Height to max release (m to m3/s)
+  sp_to_rp_max: [
+    [
+    ],
+    [
+    ]
+  ]
+
+  # Storage Height to min release (m to m3/s)
+  sp_to_rp_min: [
+    [
+    ],
+    [
+    ]
+  ]

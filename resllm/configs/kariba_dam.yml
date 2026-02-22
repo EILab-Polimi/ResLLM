@@ -2,14 +2,14 @@
 config_name: "kariba_specs"
 
 reservoir:
-  # Total Storage Capacity (Dead + Live) ~ 181 BCM
-  operable_storage_max:  181321854000 
+  # Total Storage Capacity (Dead + Live)
+  operable_storage_max:  193000000000 
   
-  # Minimum Operating Level (Dead Storage) ~ 116 BCM
-  operable_storage_min: 115947308000  
+  # Minimum Operating Level (Dead Storage)
+  operable_storage_min: 116000000000  
   
   # Max discharge 
-  max_safe_release: 11540 # To validate - atm 6x200 m3/s + 6x140 m3/s turbines + 9500 m3/s spillway
+  max_safe_release: 11539.94 # To validate - atm 6x200 m3/s + 6x140 m3/s turbines + 9500 m3/s spillway
   
   sp_to_ep: [
     [
@@ -81,32 +81,90 @@ reservoir:
     ]
   ]
   
-  # Storage to max release (m3 to m3/s)
-  sp_to_rp: [
+  # Storage Height to max release (m to m3/s)
+  sp_to_rp_max: [
     [
-        87640000000,    # Level 470 (Interpolated vol)
-        116000000000,   # Level 475.5
-        127000000000,   # Level 478
-        134500000000,   # Level 479.5 (Interpolated vol)
-        139500000000,   # Level 480.5 (Interpolated vol)
-        146000000000,   # Level 482
-        154000000000,   # Level 483.5 (Interpolated vol)
-        162000000000,   # Level 485
-        170000000000,   # Level 486.5 (Interpolated vol)
-        181000000000,   # Level 488.5
-        193000000000    # Level 489.5
+        950,
+        972.5,
+        972.9,
+        973,
+        973.5,
+        974,
+        974.5,
+        975,
+        975.5,
+        976,
+        976.6,
+        977,
+        977.5,
+        978,
+        978.5,
+        979,
+        979.5,
+        980,
     ],
     [
-        0,              # Release at 470m
-        0,              # Release at 475.5m
-        1801,           # Release at 478m
-        9459,           # Release at 479.5m
-        9694,           # Release at 480.5m
-        10018,          # Release at 482m
-        10652,          # Release at 483.5m
-        10670,          # Release at 485m
-        10969,          # Release at 486.5m
-        11539.94,       # Release at 488.5m
-        11539.94        # Release at 489.5m
+        0,
+        0,
+        780,
+        1076,
+        1250.35,
+        1420,
+        1607.44,
+        1804,
+        2007.08,
+        2220,
+        2496,
+        2668,
+        2894.46,
+        3132,
+        3364,
+        3596,
+        3828,
+        4060,
+    ]
+  ]
+
+  # Storage Height to min release (m to m3/s)
+  sp_to_rp_min: [
+    [
+        950,
+        972.5,
+        972.9,
+        973,
+        973.5,
+        974,
+        974.5,
+        975,
+        975.5,
+        976,
+        976.6,
+        977,
+        977.5,
+        978,
+        978.5,
+        979,
+        979.5,
+        980,
+    ],
+    [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        2894.46,
+        3132,
+        3364,
+        3596,
+        3828,
+        4060,
     ]
   ]
