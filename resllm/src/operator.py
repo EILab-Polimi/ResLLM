@@ -195,7 +195,7 @@ class BaseReservoirOperator:
 # Provider call helpers
 # =============================================================================
 
-_MAX_RETRIES = 3
+_MAX_RETRIES = 10
 
 
 def _with_retries(fn, *, label: str):
@@ -509,73 +509,114 @@ def _call_ollama(
     *,
     top_logprobs: int | None = None,
 ) -> tuple[AllocationDecision, str | None, str, list | None]:
-    """Call Ollama with JSON format, optional thinking, and optional logprobs.
+    """Call Ollama via the generate endpoint with optional thinking and logprobs.
 
-    When *top_logprobs* is not ``None`` the call is **non-streaming** so that
-    the full logprobs array is returned on the response object.
+    Uses ``generate`` rather than ``chat`` because thinking models often
+    leave the chat ``content`` field empty.  When thinking is enabled,
+    ``format="json"`` is omitted so the model reasons freely; the system
+    prompt JSON instruction guides output format instead.
 
     Returns:
         (AllocationDecision, thinking_text_or_None, raw_content_text, logprobs_data)
     """
-    from ollama import chat
+    from ollama import generate
 
     system_prompt = f"{system_content}{OLLAMA_JSON_INSTRUCTION}"
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content},
-    ]
-
-    # think can be bool or str ("minimal", "low", "medium", "high")
     think: bool | str = model_kwargs.get("think", True)
-    options = {k: v for k, v in model_kwargs.items() if k == "temperature"}
+    is_thinking = think is not False
+
+    kwargs: dict = {
+        "model": model_id,
+        "prompt": user_content,
+        "system": system_prompt,
+        "think": think,
+    }
+    if not is_thinking:
+        kwargs["format"] = "json"
+    if "temperature" in model_kwargs:
+        kwargs["options"] = {"temperature": model_kwargs["temperature"]}
+
+    logprobs_data: list | None = None
 
     if top_logprobs is not None:
-        # Non-streaming path — logprobs are only available on the full response
-        chat_kwargs: dict = {
-            "model": model_id,
-            "messages": messages,
-            "think": think,
-            "stream": False,
-            "format": "json",
-            "logprobs": True,
-            "top_logprobs": top_logprobs,
-        }
-        if options:
-            chat_kwargs["options"] = options
+        # Non-streaming — required for logprobs
+        kwargs.update(stream=False, logprobs=True, top_logprobs=top_logprobs)
+        response = generate(**kwargs)
+        raw_text = (response.response or "").strip()
+        thinking_text = (response.thinking or "").strip() or None
+        logprobs_data = response.logprobs
+    else:
+        # Streaming — captures thinking traces chunk-by-chunk
+        kwargs["stream"] = True
+        thinking_parts: list[str] = []
+        content_parts: list[str] = []
+        for chunk in generate(**kwargs):
+            if t := getattr(chunk, "thinking", None):
+                thinking_parts.append(t)
+            if c := getattr(chunk, "response", None):
+                content_parts.append(c)
+        raw_text = "".join(content_parts).strip()
+        thinking_text = "".join(thinking_parts).strip() or None
 
-        response = chat(**chat_kwargs)
-
-        raw_text = (getattr(response.message, "content", None) or "").strip()
-        thinking_text = (getattr(response.message, "thinking", None) or "").strip() or None
-        logprobs_data = getattr(response, "logprobs", None)
-
-        decision = _parse_ollama_decision(raw_text)
-        return decision, thinking_text, raw_text, logprobs_data
-
-    # Streaming path — captures thinking traces chunk-by-chunk
-    thinking_parts: list[str] = []
-    content_parts: list[str] = []
-    for chunk in chat(
-        model=model_id,
-        messages=messages,
-        think=think,
-        stream=True,
-        options=options or None,
-        format="json",
-    ):
-        msg = getattr(chunk, "message", None)
-        if msg is None:
-            continue
-        if t := getattr(msg, "thinking", None):
-            thinking_parts.append(t)
-        if c := getattr(msg, "content", None):
-            content_parts.append(c)
-
-    thinking_text = "".join(thinking_parts).strip() or None
-    raw_text = "".join(content_parts).strip()
+    # Some thinking models place everything in the thinking field
+    if not raw_text and thinking_text:
+        raw_text, thinking_text = _split_thinking_json(thinking_text)
 
     decision = _parse_ollama_decision(raw_text)
-    return decision, thinking_text, raw_text, None
+    return decision, thinking_text, raw_text, logprobs_data
+
+
+def _split_thinking_json(text: str) -> tuple[str, str | None]:
+    """Separate a JSON payload from preceding reasoning in a thinking blob.
+
+    Some Ollama thinking models place everything — free-text reasoning
+    *and* the final JSON object — in the ``thinking`` field, leaving
+    ``response`` empty.  This helper extracts the **last** top-level
+    JSON object (``{…}``) as the payload and treats everything before it
+    as the reasoning trace.
+
+    Returns:
+        (json_text, reasoning_text_or_None)
+    """
+    # Find the last top-level '{' ... '}' block using brace depth
+    depth = 0
+    obj_start: int | None = None
+    obj_end: int | None = None
+    in_string = False
+    escaped = False
+
+    for i, ch in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_string:
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and obj_start is not None:
+                obj_end = i + 1
+
+    if obj_start is not None and obj_end is not None:
+        json_text = text[obj_start:obj_end].strip()
+        reasoning = text[:obj_start].strip()
+        # Also grab any text after the JSON (rare but possible)
+        trailing = text[obj_end:].strip()
+        if trailing:
+            reasoning = f"{reasoning}\n{trailing}".strip() if reasoning else trailing
+        return json_text, reasoning or None
+
+    # No JSON object found — return the whole thing as JSON (will fail at parse)
+    return text, None
 
 
 def _parse_ollama_decision(raw_text: str) -> AllocationDecision:
