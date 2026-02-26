@@ -2,6 +2,12 @@
 config_name: "kafuegorge_lower_specs"
 
 reservoir:
+  turbines:
+    turbine:
+      capacity: 42 #m3/s
+      efficiency: 0.61
+      head: 397 #m
+      quantity: 6
   # Total Storage Capacity (Dead + Live)
   operable_storage_max:  6179000000 
   
@@ -11,6 +17,7 @@ reservoir:
   # Max discharge 
   max_safe_release: 4060 # To validate - atm 6x200 m3/s + 6x140 m3/s turbines + 9500 m3/s spillway
   
+  # Volume-Height curve (m3 to m)
   sp_to_ep: [
     [
         0,              # Level 972.3m
@@ -59,6 +66,57 @@ reservoir:
         976.75,
         977,
         978,
+    ]
+  ]
+  # Volume-Area curve (m3 to m2)
+  sp_to_aa: [
+    [
+        0,              # Level 972.3m
+        5000000,        # Level 972.5m
+        11000000,       # Level 972.75m
+        20000000,       # Level 973m
+        29000000,    # Level 973.5m
+        40000000,      # Level 974m
+        53000000,
+        69000000,
+        88000000,
+        111000000,
+        138000000,
+        170000000,
+        211000000,
+        263000000,
+        331000000,
+        423000000,
+        548000000,
+        709000000,
+        785000000,
+        915000000,
+        1178000000,
+        2845000000 # estimated max level 978m
+    ],
+    [
+        20000000,
+        25000000,
+        30000000,
+        35000000,
+        40000000,
+        47000000,
+        58000000,
+        70000000,
+        83000000,
+        98000000,
+        119000000,
+        142000000,
+        180000000,
+        235000000,
+        310000000,
+        430000000,
+        565000000,
+        725000000,
+        805000000,
+        925000000,
+        1175000000,
+        2160000000
     ]
   ]
   # Day of water year to TOCS (Active Storage - m3)

@@ -2,125 +2,161 @@
 config_name: "cahorabassa_specs"
 
 reservoir:
-  # Total Storage Capacity (Dead + Live)
-  operable_storage_max:  65991000000 
-  
-  # Minimum Operating Level (Dead Storage)
-  operable_storage_min: 974600000  
-  
-  # Max discharge 
-  max_safe_release: 16208.81 # To validate - atm 6x200 m3/s + 6x140 m3/s turbines + 9500 m3/s spillway
-  
-  sp_to_ep: [
-    [
-        12000000,
-        32000000,
-        4745000000,
-        10689000000,
-        17963000000,
-        26699000000,
-        37026000000,
-        51704000000,
-        62977000000,
-        65991000000,
-    ],
-    [
-        291,
-        295,
-        300,
-        305,
-        310,
-        315,
-        320,
-        326,
-        330,
-        331,
-    ]
-  ]
-  # Day of water year to TOCS (Active Storage - m3)
-  tp_to_tocs : [
-    [
-        31,  # Month 1 end
-        59,  # Month 2 end
-        90,  # Month 3 end
-        120, # Month 4 end
-        151, # Month 5 end
-        181, # Month 6 end
-        212, # Month 7 end
-        243, # Month 8 end
-        273, # Month 9 end
-        304, # Month 10 end
-        334, # Month 11 end
-        365  # Month 12 end
-    ],
-    [
-        38867000000,
-        40253000000,
-        48332000000,
-        58346000000,
-        60069000000,
-        60069000000,
-        57213000000,
-        51733000000,
-        51733000000,
-        51733000000,
-        51733000000,
-        44072000000,
-    ]
-  ]
-  
-  # Storage Height to max release (m to m3/s)
-  sp_to_rp_max: [
-    [
-        291,
-        295,
-        296,
-        301,
-        306,
-        311,
-        316,
-        321,
-        326,
-        331,
-    ],
-    [
-        0,
-        0,
-        5189.2,
-        13128,
-        13626,
-        14004,
-        14090,
-        14522,
-        14868,
-        16208.81,
-    ]
-  ]
 
-  # Storage Height to min release (m to m3/s)
-  sp_to_rp_min: [
-    [
-        291,
-        295,
-        296,
-        301,
-        306,
-        311,
-        316,
-        321,
-        326,
-        331,
-    ],
-    [
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        16208.81,
+    turbines:
+        turbine:
+            capacity: 452 #m3/s
+            efficiency: 0.73
+            head: 128 #m
+            quantity: 5
+
+    # Total Storage Capacity (Dead + Live)
+    operable_storage_max:  65991000000 
+    
+    # Minimum Operating Level (Dead Storage)
+    operable_storage_min: 974600000  
+    
+    # Max discharge 
+    max_safe_release: 16208.81 # To validate - atm 6x200 m3/s + 6x140 m3/s turbines + 9500 m3/s spillway
+    
+    # Volume-Height curve (m3 to m)
+    sp_to_ep: [
+        [
+            12000000,
+            32000000,
+            4745000000,
+            10689000000,
+            17963000000,
+            26699000000,
+            37026000000,
+            51704000000,
+            62977000000,
+            65991000000,
+        ],
+        [
+            291,
+            295,
+            300,
+            305,
+            310,
+            315,
+            320,
+            326,
+            330,
+            331,
+        ]
     ]
-  ]
+    # Volume-Area curve (m3 to m2)
+    sp_to_aa: [
+        [
+            12000000,
+            32000000,
+            4745000000,
+            10689000000,
+            17963000000,
+            26699000000,
+            37026000000,
+            51704000000,
+            62977000000,
+            65991000000,
+        ],
+        [
+            680000000,
+            838000000,
+            1065000000,
+            1317000000,
+            1597000000,
+            1902000000,
+            2233000000,
+            2665000000,
+            2974000000,
+            3054000000
+        ]
+    ]
+    # Day of water year to TOCS (Active Storage - m3)
+    tp_to_tocs : [
+        [
+            31,  # Month 1 end
+            59,  # Month 2 end
+            90,  # Month 3 end
+            120, # Month 4 end
+            151, # Month 5 end
+            181, # Month 6 end
+            212, # Month 7 end
+            243, # Month 8 end
+            273, # Month 9 end
+            304, # Month 10 end
+            334, # Month 11 end
+            365  # Month 12 end
+        ],
+        [
+            38867000000,
+            40253000000,
+            48332000000,
+            58346000000,
+            60069000000,
+            60069000000,
+            57213000000,
+            51733000000,
+            51733000000,
+            51733000000,
+            51733000000,
+            44072000000,
+        ]
+    ]
+    
+    # Storage Height to max release (m to m3/s)
+    sp_to_rp_max: [
+        [
+            291,
+            295,
+            296,
+            301,
+            306,
+            311,
+            316,
+            321,
+            326,
+            331,
+        ],
+        [
+            0,
+            0,
+            5189.2,
+            13128,
+            13626,
+            14004,
+            14090,
+            14522,
+            14868,
+            16208.81,
+        ]
+    ]
+
+    # Storage Height to min release (m to m3/s)
+    sp_to_rp_min: [
+        [
+            291,
+            295,
+            296,
+            301,
+            306,
+            311,
+            316,
+            321,
+            326,
+            331,
+        ],
+        [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            16208.81,
+        ]
+    ]

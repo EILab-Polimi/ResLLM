@@ -2,6 +2,12 @@
 config_name: "kafuegorgelower_specs"
 
 reservoir:
+  turbines:
+    turbine:
+      capacity: 97.4 #m3/s
+      efficiency: 0.88
+      head: 182.7 #m
+      quantity: 5
   # Total Storage Capacity (Dead + Live)
   operable_storage_max:  62840000 
   
@@ -10,6 +16,8 @@ reservoir:
   
   # Max discharge 
   max_safe_release: 4445.967529 
+
+  # Volume-Height curve (m3 to m)
   sp_to_ep: [
     [
         0,
@@ -36,6 +44,33 @@ reservoir:
         610.2,
     ]
   ]
+  # Volume-Area curve (m3 to m2)
+  sp_to_aa: [
+    [
+        0,
+        5150000,
+        10950000,
+        12930000,
+        24010000,
+        39120000,
+        59080000,
+        62840000,
+        83520000,
+        112980000
+    ],
+    [
+        260000,
+        420000,
+        550000,
+        600000,
+        850000,
+        1130000,
+        1490000,
+        1530000,
+        1720000,
+        2140000
+    ]
+  ]
   # Day of water year to TOCS (Active Storage - m3)
   tp_to_tocs : [
     [
@@ -58,4 +93,12 @@ reservoir:
     ],
     [
     ]
+  ]
+
+  # Rating curve min/max
+  rating_curve_minmax:
+  [
+    10950000,
+    62840000,
+    4445.967529
   ]
