@@ -69,17 +69,17 @@ class ZambeziEnvironment:
         
         # State tracking equivalent to C++ vectors
         self.r_itt_delay = np.zeros(self.H + 3)
-        self.r_itt_delay[1] = 56.183290322580640 # October 1985
-        self.r_itt_delay[2] = 59.670678571428570 # November 1985
-        self.r_itt_delay[3] = 101.7307419354839 # December 1985
-        self.storage = {dam: np.zeros(self.H + 1) for dam in ['ITT', 'KGU', 'KGL', 'KA', 'CB']}
-        self.release = {dam: np.zeros(self.H + 1) for dam in ['ITT', 'KGU', 'KGL', 'KA', 'CB']}
-        self.evaporation = {dam: np.zeros(self.H) for dam in ['ITT', 'KGU', 'KGL', 'KA', 'CB']}
-        #self.level = {dam: np.zeros(self.H) for dam in ['ITT', 'KGU', 'KGL', 'KA', 'CB']}
+        self.r_itt_delay[0] = 56.183290322580640 # October 1985
+        self.r_itt_delay[1] = 59.670678571428570 # November 1985
+        self.r_itt_delay[2] = 101.7307419354839 # December 1985
+        self.storage = {dam: np.zeros(self.H + 1) for dam in ['itezhitezhi', 'kafuegorgeupper', 'kafuegorgelower', 'kariba', 'cahorabassa']}
+        self.release = {dam: np.zeros(self.H + 1) for dam in ['itezhitezhi', 'kafuegorgeupper', 'kafuegorgelower', 'kariba', 'cahorabassa']}
+        self.evaporation = {dam: np.zeros(self.H) for dam in ['itezhitezhi', 'kafuegorgeupper', 'kafuegorgelower', 'kariba', 'cahorabassa']}
+        #self.level = {dam: np.zeros(self.H) for dam in ['itezhitezhi', 'kafuegorgeupper', 'kafuegorgelower', 'kariba', 'cahorabassa']}
         
         # Output tracking
-        self.prod_hyd = {dam: np.zeros(self.H) for dam in ['ITT', 'KGU', 'KGL', 'KA', 'CB']}
-        self.prod_sol = {dam: np.zeros(self.H) for dam in ['KA_N', 'KA_S', 'CB']}
+        self.prod_hyd = {dam: np.zeros(self.H) for dam in ['itezhitezhi', 'kafuegorgeupper', 'kafuegorgelower', 'kariba', 'cahorabassa']}
+        self.prod_sol = {dam: np.zeros(self.H) for dam in ['KA_N', 'KA_S', 'cahorabassa']}
         
         # Irrigation and Deficits
         self.irr_delivery = {i: np.zeros(self.H + 1) for i in [2, 3, 4, 5, 6, 7, 8, 9]}
@@ -107,7 +107,7 @@ class ZambeziEnvironment:
     
     def erase_execution(self, t):
         """Resets the state of the environment to just before executing month t."""
-        for dam in ['ITT', 'KGU', 'KGL', 'KA', 'CB']:
+        for dam in ['itezhitezhi', 'kafuegorgeupper', 'kafuegorgelower', 'kariba', 'cahorabassa']:
             self.storage[dam][t+1] = 0.0
             self.release[dam][t+1] = 0.0
             self.evaporation[dam][t] = 0.0
@@ -132,12 +132,12 @@ class ZambeziEnvironment:
         
         # ITEZHITEZHI (ITT)
         # C++: sd_rd = Itezhitezhi->integration_daily(...)
-        st_itt, rt_itt, evap_itt = reservoirs['ITT'].integration_daily(
-            days, self.storage['ITT'][t], actions['ITT'], inflows['q_Itt'], moy
+        st_itt, rt_itt, evap_itt = reservoirs['itezhitezhi'].integration_daily(
+            days, self.storage['itezhitezhi'][t], actions['itezhitezhi'], inflows['Inflow_qInfItt'], moy
         )
-        self.storage['ITT'][t+1] = st_itt
-        self.release['ITT'][t+1] = rt_itt
-        self.evaporation['ITT'][t] = evap_itt
+        self.storage['itezhitezhi'][t+1] = st_itt
+        self.release['itezhitezhi'][t+1] = rt_itt
+        self.evaporation['itezhitezhi'][t] = evap_itt
         
         # 2-month delay buffer
         # C++: r_itt_delay[t + 3] = output->itt[2][t + 1] * (integrationStep) / (integrationStep_delay)
@@ -145,7 +145,7 @@ class ZambeziEnvironment:
         self.r_itt_delay[t + 2] = rt_itt * delay_factor  # Note: 0-indexed adjustment
         
         # Irrigation 4 (Kafue Flats)
-        q_kf_avail = inflows['q_KafueFlats'] + self.r_itt_delay[t]
+        q_kf_avail = inflows['Inflow_qKafueFlats'] + self.r_itt_delay[t]
         self.irr_delivery[4][t+1] = self.irr_policy.get_irr_output(
             input_inflow=q_kf_avail, 
             input_w=irr_demands[4][t], 
@@ -156,28 +156,28 @@ class ZambeziEnvironment:
         
         # KAFUE GORGE UPPER (KGU)
         q_kgu_in = q_kf_avail - self.irr_delivery[4][t+1]
-        st_kgu, rt_kgu, evap_kgu = reservoirs['KGU'].integration_daily(
-            days, self.storage['KGU'][t], actions['KGU'], q_kgu_in, moy
+        st_kgu, rt_kgu, evap_kgu = reservoirs['kafuegorgeupper'].integration_daily(
+            days, self.storage['kafuegorgeupper'][t], actions['kafuegorgeupper'], q_kgu_in, moy
         )
-        self.storage['KGU'][t+1] = st_kgu
-        self.release['KGU'][t+1] = rt_kgu
-        self.evaporation['KGU'][t] = evap_kgu
+        self.storage['kafuegorgeupper'][t+1] = st_kgu
+        self.release['kafuegorgeupper'][t+1] = rt_kgu
+        self.evaporation['kafuegorgeupper'][t] = evap_kgu
         
         # KAFUE GORGE LOWER (KGL)
         q_kgl_in = rt_kgu
-        st_kgl, rt_kgl, evap_kgl = reservoirs['KGL'].integration_daily(
-            days, self.storage['KGL'][t], actions['KGL'], q_kgl_in, moy
+        st_kgl, rt_kgl, evap_kgl = reservoirs['kafuegorgelower'].integration_daily(
+            days, self.storage['kafuegorgelower'][t], actions['kafuegorgelower'], q_kgl_in, moy
         )
-        self.storage['KGL'][t+1] = st_kgl
-        self.release['KGL'][t+1] = rt_kgl
-        self.evaporation['KGL'][t] = evap_kgl
+        self.storage['kafuegorgelower'][t+1] = st_kgl
+        self.release['kafuegorgelower'][t+1] = rt_kgl
+        self.evaporation['kafuegorgelower'][t] = evap_kgl
 
         # ---------------------------------------------------------
         # 2. MAIN STEM & LOWER ZAMBEZI (KA -> CB)
         # ---------------------------------------------------------
         
         # Bypass BG and DG inflows directly to Kariba area
-        q_upper_zambezi = inflows['q_Bg'] + inflows['q_Cuando'] + inflows['q_KaLat']
+        q_upper_zambezi = inflows['Inflow_qInfBg'] + inflows['Inflow_qCuando'] + inflows['Inflow_qInfKaLat']
         self.irr_delivery[2][t+1] = self.irr_policy.get_irr_output(
             input_inflow=q_upper_zambezi,
             input_w=irr_demands[2][t],
@@ -188,12 +188,12 @@ class ZambeziEnvironment:
         
         # KARIBA (KA)
         q_ka_in = q_upper_zambezi - self.irr_delivery[2][t+1]
-        st_ka, rt_ka, evap_ka = reservoirs['KA'].integration_daily(
-            days, self.storage['KA'][t], actions['KA'], q_ka_in, moy
+        st_ka, rt_ka, evap_ka = reservoirs['kariba'].integration_daily(
+            days, self.storage['kariba'][t], actions['kariba'], q_ka_in, moy
         )
-        self.storage['KA'][t+1] = st_ka
-        self.release['KA'][t+1] = rt_ka
-        self.evaporation['KA'][t] = evap_ka
+        self.storage['kariba'][t+1] = st_ka
+        self.release['kariba'][t+1] = rt_ka
+        self.evaporation['kariba'][t] = evap_ka
         
         # Mid-Zambezi Irrigation (3, 5, 6)
         self.irr_delivery[3][t+1] = self.irr_policy.get_irr_output(
@@ -221,13 +221,13 @@ class ZambeziEnvironment:
             )
 
         # CAHORA BASSA (CB)
-        q_cb_in = inflows['q_Cb'] + q_irr6_avail - self.irr_delivery[6][t+1]
-        st_cb, rt_cb, evap_cb = reservoirs['CB'].integration_daily(
-            days, self.storage['CB'][t], actions['CB'], q_cb_in, moy
+        q_cb_in = inflows['Inflow_qInfCb'] + q_irr6_avail - self.irr_delivery[6][t+1]
+        st_cb, rt_cb, evap_cb = reservoirs['cahorabassa'].integration_daily(
+            days, self.storage['cahorabassa'][t], actions['cahorabassa'], q_cb_in, moy
         )
-        self.storage['CB'][t+1] = st_cb
-        self.release['CB'][t+1] = rt_cb
-        self.evaporation['CB'][t] = evap_cb
+        self.storage['cahorabassa'][t+1] = st_cb
+        self.release['cahorabassa'][t+1] = rt_cb
+        self.evaporation['cahorabassa'][t] = evap_cb
         
         self.irr_delivery[7][t+1] = self._get_irrigation(rt_cb, irr_demands[7])
 
@@ -240,7 +240,7 @@ class ZambeziEnvironment:
                 apply_hdg=self.apply_hdg
             )
         
-        q_9_avail = q_8_avail + inflows['q_Shire'] - self.irr_delivery[8][t+1] 
+        q_9_avail = q_8_avail + inflows['Inflow_qShire'] - self.irr_delivery[8][t+1] 
         self.irr_delivery[9][t+1] = self.irr_policy.get_irr_output(
                 input_inflow=q_9_avail, 
                 input_w=irr_demands[9][t], 
@@ -250,15 +250,15 @@ class ZambeziEnvironment:
         )
 
         # HYDROPOWER & SOLAR CURTAILMENT PHYSICS
-        self.prod_hyd['ITT'][t] = reservoirs['ITT'].calculate_power(st_itt, rt_itt, moy, days, self.config)['hydro']
-        self.prod_hyd['KGU'][t] = reservoirs['KGU'].calculate_power(st_kgu, rt_kgu, moy, days, self.config)['hydro']
-        self.prod_hyd['KGL'][t] = reservoirs['KGL'].calculate_power(st_kgl, rt_kgl, moy, days, self.config)['hydro']
-        self.prod_hyd['KA'][t] = reservoirs['KA'].calculate_power(st_ka, rt_ka, moy, days, self.config)['hydro']
-        self.prod_hyd['CB'][t] = reservoirs['CB'].calculate_power(st_cb, rt_cb, moy, days, self.config)['hydro']
+        self.prod_hyd['itezhitezhi'][t] = reservoirs['itezhitezhi'].calculate_power(st_itt, rt_itt, moy, days, self.config)['hydro']
+        self.prod_hyd['kafuegorgeupper'][t] = reservoirs['kafuegorgeupper'].calculate_power(st_kgu, rt_kgu, moy, days, self.config)['hydro']
+        self.prod_hyd['kafuegorgelower'][t] = reservoirs['kafuegorgelower'].calculate_power(st_kgl, rt_kgl, moy, days, self.config)['hydro']
+        self.prod_hyd['kariba'][t] = reservoirs['kariba'].calculate_power(st_ka, rt_ka, moy, days, self.config)['hydro']
+        self.prod_hyd['cahorabassa'][t] = reservoirs['cahorabassa'].calculate_power(st_cb, rt_cb, moy, days, self.config)['hydro']
 
-        self.prod_sol['KA_N'][t] = reservoirs['KA'].calculate_power(st_ka, rt_ka, moy, days, self.config)['solar_N']
-        self.prod_sol['KA_S'][t] = reservoirs['KA'].calculate_power(st_ka, rt_ka, moy, days, self.config)['solar_S']
-        self.prod_sol['CB'][t] = reservoirs['CB'].calculate_power(st_cb, rt_cb, moy, days, self.config)['solar']
+        self.prod_sol['KA_N'][t] = reservoirs['kariba'].calculate_power(st_ka, rt_ka, moy, days, self.config)['solar_N']
+        self.prod_sol['KA_S'][t] = reservoirs['kariba'].calculate_power(st_ka, rt_ka, moy, days, self.config)['solar_S']
+        self.prod_sol['cahorabassa'][t] = reservoirs['cahorabassa'].calculate_power(st_cb, rt_cb, moy, days, self.config)['solar']
         
         # Squared Irrigation Deficits (g_deficit_norm)
         for i in [2, 3, 4, 5, 6, 7, 8, 9]:

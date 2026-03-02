@@ -7,10 +7,12 @@ Reservoir simulation classes for the resllm project.
 
 """
 
+import os
+
 import numpy as np
 import pandas as pd
 import src.utils as utils
-
+import yaml
 
 class BaseReservoir:
     """
@@ -19,8 +21,10 @@ class BaseReservoir:
 
     def __init__(
         self,
-        characteristics: dict = {},
+        config_path=None,
     ):
+        with open(os.path.join("configs", config_path), 'r') as f:
+            characteristics = yaml.safe_load(f)
         self.characteristics = characteristics
 
     def compute_max_release(self, S):
@@ -61,29 +65,6 @@ class BaseReservoir:
         
         return np.interp(current_elevation, sp_elev, rp_release) # m3/s
 
-    def compute_tocs(self, dowy, date=None):
-        """
-        Computes the Top of Conservation Storage (TOCS) based on the current day of the water year
-        or, if using the historical option, the date.
-        Parameters:
-            dowy (int): The current day of the water year (1-365/366).
-            date (str): The date in 'YYYY-MM-DD' format.
-        Returns:
-            float: The Top of Conservation Storage (TOCS) in TAF.
-        """
-        tp = self.characteristics["tp_to_tocs"][0]
-        tocs = self.characteristics["tp_to_tocs"][1]
-        tocs = np.interp(dowy, tp, tocs)
-        if self.tocs == "historical":
-            hist_st = self.inflows.loc[
-                (self.inflows["date"] == date), "storage"
-            ].values[0]
-            return np.max([tocs, hist_st])
-        elif self.tocs == "fixed":
-            return tocs
-        else:
-            return self.characteristics["operable_storage_max"]
-
     def volume_to_height(self, S):
         """
         Converts the storage in m3 to height in feet based on storage-elevation relationship.
@@ -107,12 +88,6 @@ class BaseReservoir:
         sp = self.characteristics["sp_to_aa"][0]
         aa = self.characteristics["sp_to_aa"][1]
         return np.interp(S, sp, aa)
-
-    def compute_average_cumulative_inflow_by_month(self):
-        raise NotImplementedError("Not needed.")
- 
-    def compute_average_remaining_demand_by_month(self):
-        raise NotImplementedError("Not needed.")
 
     def actual_release_daily(self, desired_release_m3s, S_m3, cmonth, n_sim_m3s, mef_m3s):
         """

@@ -28,6 +28,7 @@ class Reservoir:
                 - steps_per_year (int): Number of time steps per year.
                 - inflow_file (str): Path to the inflow data file.
                 - demand_file (str): Path to the demand data file.
+                - turbines (dict): Dictionary containing turbine characteristics (capacity, efficiency, head, quantity).
                 - operable_storage_max (float): Maximum operable storage in cubic meters.
                 - operable_storage_min (float): Minimum operable storage in cubic meters.
                 - max_safe_release (float):  Maximum safe release in cubic meters.
@@ -40,7 +41,22 @@ class Reservoir:
         self.steps_per_year = characteristics["steps_per_year"]
 
         self.tocs = characteristics["tocs"]
-        self.demand = np.loadtxt(characteristics["demand_file"]) # demand, cubic meters
+        self.demand = np.loadtxt(characteristics["demand_file"]) # demand, MWh
+        self.turbines = characteristics["turbines"]
+
+        if len(self.demand) != self.steps_per_year:
+            raise ValueError(f"Length of demand data ({len(self.demand)}) does not match steps_per_year ({self.steps_per_year}).")
+        if self.steps_per_year == 12:
+            self.demand = np.array([
+                utils.twh_to_m3(d, self.turbines, freq='M', month=i+1, year=2001) # Using a non-leap year for month length
+                for i, d in enumerate(self.demand)
+            ])  # demand, cubic meters
+        else:
+            self.demand = np.array([
+                utils.twh_to_m3(d, self.turbines, freq='D')
+                for i, d in enumerate(self.demand)
+            ])  
+
         print(f"Demand data loaded: {characteristics['demand_file']}")
 
         self.inflows = pd.read_csv(characteristics["inflow_file"])  # inflow, cubic meters

@@ -62,6 +62,7 @@ class SimulationRunner:
             "steps_per_year": self.args.steps_per_year,
             "tocs": self.tocs,
             "demand_file": os.path.join(self.data_dir, self.args.demand_file),
+            "turbines": self.config["reservoir"]["turbines"],
             "inflow_file": os.path.join(self.data_dir, self.args.inflow_file),
             "wy_forecast_file": os.path.join(self.data_dir, self.args.wy_forecast_file) if self.args.wy_forecast_file else False,
             "operable_storage_max": self.config["reservoir"]["operable_storage_max"],

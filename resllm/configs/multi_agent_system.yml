@@ -5,12 +5,13 @@ multi_agent_system:
   end_year: 2000                       # End year of simulation (YYYY)
   model_server: "DeepSeek_Local"               # Model server to use (e.g., Ollama, OpenAI, xAI)
   model: "Qwen-32B"                      # Model name/version
+  inflow_file: "combined_inflows.csv"
 
   # --- Simulation & Data ---
   extra_name: ""                       # Extra name to append to output files
   steps_per_year: 12                   # Number of simulation steps per year (12 for monthly, 365 for daily)
   nsample: 10                          # Number of simulation samples to run
-
+  max_rounds: 20                       # Maximum number of rounds per negotiation (for multi-agent systems)
   
   # --- LLM Operator Settings ---
   llm-config:

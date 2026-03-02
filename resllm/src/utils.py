@@ -92,6 +92,63 @@ prompt_closure_text = """
 import numpy as np
 import calendar
 
+def twh_to_m3(demand_twh, turbines, freq='M', month=None, year=None):
+    """Convert demand from megawatt-hours (MWh) to cubic meters (m³).
+
+    Parameters:
+        demand_twh (float): Energy demand in terawatt-hours.
+        turbines (dict): Dictionary containing turbine characteristics. 
+                         Expected keys per turbine: 'max_discharge' (m³/s), 
+                         'efficiency' (float 0-1), 'head' (m), 'quantity' (int).
+        freq (str): Time frequency ('D' for Day, 'M' for Month).
+
+    Returns:
+        float: Volume of water in cubic meters required to meet the demand.
+    """
+    demand_mwh = demand_twh * 1e6  # Convert TWh to MWh
+
+    if freq == 'D':
+        hours_per_period = 24
+    elif freq == 'M':
+        if month is not None and year is not None:
+            days_in_month = calendar.monthrange(year, month)[1]
+            hours_per_period = 24 * days_in_month
+        else:
+            hours_per_period = 24 * 30  # Assuming a standard 30-day month
+    else:
+        raise ValueError("Frequency must be 'D' or 'M'")
+
+    total_max_power_mw = 0
+    total_max_flow_m3s = 0
+
+    # Calculate system-wide power and flow to find average yield
+    for name, turbine in turbines.items():
+        # Calculate total maximum flow for this set of turbines (Q)
+        Q_total = turbine['quantity'] * turbine['capacity'] # m³/s
+        
+        # Calculate Power in MW: P = (eta * rho * g * h * Q) / 10^6
+        P_mw = (turbine['efficiency'] * 1000 * 9.81 * turbine['head'] * Q_total) / 10**6
+        
+        total_max_power_mw += P_mw
+        total_max_flow_m3s += Q_total 
+
+    # Calculate the system's average energy yield (MWh per m³ of water)
+    # Power (MW) / Flow (m³/s) = MW per m³/s. Divide by 3600 to get MWh per m³.
+    avg_mwh_per_m3 = (total_max_power_mw / total_max_flow_m3s) / 3600
+
+    # 4. Convert the energy demand directly to water volume
+    required_volume_m3 = demand_mwh / avg_mwh_per_m3
+
+    # 5. Feasibility Check: Can the dam actually produce this much in the given time?
+    max_possible_mwh = total_max_power_mw * hours_per_period
+    
+    if demand_mwh > max_possible_mwh:
+        print(f"WARNING: Demand ({demand_mwh:.2f} MWh) exceeds the maximum possible "
+              f"generation for this period ({max_possible_mwh:.2f} MWh).")
+
+    return required_volume_m3
+
+
 def m3s_to_m3(m3s, freq='D', month=None, year=None):
     """Convert cubic meters per second to cubic meters per specified frequency.
 
