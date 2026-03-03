@@ -3,9 +3,11 @@
 
 import os
 import argparse
+import threading
 import yaml
 import numpy as np
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # resllm imports
 from src.reservoir import Reservoir
@@ -16,6 +18,159 @@ import src.utils as utils
 # dotenv imports
 from dotenv import load_dotenv
 load_dotenv(verbose=True)
+
+
+def run_single_sample(
+    n: int,
+    args,
+    resolved_model_config,
+    model: str,
+    R1_characteristics: dict,
+    file_dir: str,
+    print_lock: threading.Lock,
+) -> None:
+    """Run a single simulation sample end-to-end.
+
+    Parameters:
+        n: Sample index.
+        args: Parsed CLI arguments.
+        resolved_model_config: Resolved model configuration.
+        model: Model name string (used for output filenames).
+        R1_characteristics: Reservoir characteristics dict.
+        file_dir: Absolute path to the resllm/ directory.
+        print_lock: Threading lock for serialized console output.
+    """
+    import src.utils as utils  # noqa: F401 (ensure available in thread)
+
+    start_wy = args.start_year
+    end_wy = args.end_year
+    s0 = args.starting_storage
+    ny = end_wy - start_wy + 1
+
+    # Each sample gets its own Reservoir and Operator instances
+    R1 = Reservoir(characteristics=R1_characteristics)
+    R1_agent = build_operator(
+        resolved_model_config,
+        R1,
+        include_red_herring=args.include_red_herring,
+        debug_response=args.debug_response,
+    )
+
+    # simulation dataframes
+    R1.record = pd.DataFrame(index=range(ny * 365))
+    R1_agent.record = pd.DataFrame(index=range(ny * 365))
+
+    # set the initial allocation decision
+    allocation_percent = 100
+    t = 0
+
+    # Setup output filenames
+    safe_model_name = model.replace(":", "-").replace("/", "_")
+    safe_reasoning_effort = (args.reasoning_effort or "none").strip().lower().replace(" ", "-")
+    output_stem = f"{safe_model_name}_r-{safe_reasoning_effort}"
+    output_dir = os.path.join(file_dir, "output")
+    os.makedirs(output_dir, exist_ok=True)
+    simulation_output_file = os.path.join(
+        output_dir, f"{output_stem}_simulation_output_n{n}.csv"
+    )
+    decision_output_file = os.path.join(
+        output_dir, f"{output_stem}_decision_output_n{n}.csv"
+    )
+    logprobs_output_file = os.path.join(
+        output_dir, f"{output_stem}_logprobs_output_n{n}.csv"
+    )
+
+    prefix = f"[n={n}]"
+
+    # period of record loop
+    with print_lock:
+        print(f"\n══ Simulation Start (sample {n}, WY {start_wy}\u2013{end_wy}) ═" + "═" * 20)
+    for wy in np.arange(start_wy, end_wy + 1):
+        with print_lock:
+            print(f"  {prefix} Water year {wy}")
+        # date range for the water year
+        date_range = pd.date_range(start=f"{wy-1}-10-01", end=f"{wy}-09-30", freq="D")
+        # remove leap day
+        if len(date_range) == 366:
+            leap_day = (date_range.month == 2) & (date_range.day == 29)
+            date_range = date_range[~leap_day]
+
+        # loop through the days of the water year
+        for ty, d in enumerate(date_range):
+            # get the month of the water year
+            mowy = d.month - 9 if d.month > 9 else d.month + 3
+
+            # SIMULATE RESERVOIR
+            # - Observation
+            st_1 = s0 if t == 0 else R1.record.loc[t - 1, "st"]
+
+            # - LLM Decision at the start of each month
+            if d.day == 1 and args.model != 'release-demand':
+                with print_lock:
+                    print(f"    {prefix} Month {mowy:>2} \u2014 requesting allocation decision")
+                R1_agent.set_observation(
+                    idx=t, date=d, wy=wy, mowy=mowy, dowy=ty + 1, alloc_1=allocation_percent, st_1=st_1
+                )
+                allocation_percent, _, _ = R1_agent.make_allocation_decision(idx=t)
+
+            # current downstream demand
+            dt = R1.demand[ty]
+            # set target demand from allocation decision
+            uu = dt * allocation_percent / 100.0
+
+            # inflow
+            inflow_rows = R1.inflows.loc[
+                (R1.inflows["water_year"] == wy)
+                & (R1.inflows["month"] == d.month)
+                & (R1.inflows["day"] == d.day),
+                "inflow",
+            ]
+            if inflow_rows.empty:
+                raise ValueError(
+                    f"Missing inflow for date={d.strftime('%Y-%m-%d')} (WY={wy})"
+                )
+            qt = float(inflow_rows.iloc[0])
+
+            # TOCS and evaluate
+            tocs = R1.compute_tocs(dowy=ty + 1, date=d.strftime("%Y-%m-%d"))
+            rt, st = R1.evaluate(st_1=st_1, qt=qt, uu=uu, tocs=tocs)
+
+            # record the timestep
+            R1.record_timestep(
+                idx=t, date=d, wy=wy, mowy=mowy, dowy=ty + 1, qt=qt, st=st, rt=rt, dt=dt, uu=uu
+            )
+
+            # increment timestep
+            t += 1
+
+            # Save outputs at the end of each month
+            if d.day == date_range[date_range.month == d.month][-1].day:
+                # Calculate the start index of the current month
+                days_in_current_month = (date_range.month == d.month).sum()
+                month_start_idx = t - days_in_current_month
+
+                # Append only the current month's records
+                R1.record.loc[month_start_idx:t].dropna().to_csv(
+                    simulation_output_file, index=False, mode='a',
+                    header=not os.path.exists(simulation_output_file)
+                )
+                if args.model != "release-demand":
+                    R1_agent.record.loc[month_start_idx:t].dropna(
+                        subset=["allocation_percent"]
+                    ).to_csv(
+                        decision_output_file, quotechar='"', index=False, mode='a',
+                        header=not os.path.exists(decision_output_file)
+                    )
+                logprobs_df = R1_agent.pop_logprobs_record()
+                if not logprobs_df.empty:
+                    logprobs_df.to_csv(
+                        logprobs_output_file, index=False, mode='a',
+                        header=not os.path.exists(logprobs_output_file)
+                    )
+
+    with print_lock:
+        print(f"  {prefix} Simulation complete")
+
 
 def main():
     args = parse_args()
@@ -85,132 +240,34 @@ def main():
         "sp_to_rp": config["folsom_reservoir"]["sp_to_rp"],
     }
 
-    # Create reservoir
-    R1 = Reservoir(characteristics=R1_characteristics)
-
-    # --- AGENT --- #
-    R1_agent = build_operator(
-        resolved_model_config,
-        R1,
-        include_red_herring=args.include_red_herring,
-        debug_response=args.debug_response,
-    )
-
     # --- SIMULATION --- #
-    start_wy = args.start_year
-    end_wy = args.end_year
-    s0 = args.starting_storage
-    ny = end_wy - start_wy + 1
-    for n in range(nsample):
-        # simulation dataframes
-        R1.record = pd.DataFrame(index=range(ny * 365))
-        R1_agent.record = pd.DataFrame(index=range(ny * 365))
+    print_lock = threading.Lock()
 
-        # set the initial allocation decision
-        allocation_percent = 100
-        t = 0
-
-        # Setup output filenames
-        safe_model_name = model.replace(":", "-").replace("/", "_")
-        safe_reasoning_effort = (args.reasoning_effort or "none").strip().lower().replace(" ", "-")
-        output_stem = f"{safe_model_name}_r-{safe_reasoning_effort}"
-        output_dir = os.path.join(file_dir, "output")
-        os.makedirs(output_dir, exist_ok=True)
-        simulation_output_file = os.path.join(
-            output_dir, f"{output_stem}_simulation_output_n{n}.csv"
-        )
-        decision_output_file = os.path.join(
-            output_dir, f"{output_stem}_decision_output_n{n}.csv"
-        )
-        logprobs_output_file = os.path.join(
-            output_dir, f"{output_stem}_logprobs_output_n{n}.csv"
-        )
-
-        # period of record loop
-        print(f"\n══ Simulation Start (sample {n}, WY {start_wy}–{end_wy}) ═" + "═" * 20)
-        for wy in np.arange(start_wy, end_wy + 1):
-            print(f"  Water year {wy}")
-            # date range for the water year
-            date_range = pd.date_range(start=f"{wy-1}-10-01", end=f"{wy}-09-30", freq="D")
-            # remove leap day
-            if len(date_range) == 366:
-                leap_day = (date_range.month == 2) & (date_range.day == 29)
-                date_range = date_range[~leap_day]
-
-            # loop through the days of the water year
-            for ty, d in enumerate(date_range):
-                # get the month of the water year
-                mowy = d.month - 9 if d.month > 9 else d.month + 3
-
-                # SIMULATE RESERVOIR
-                # - Observation
-                st_1 = s0 if t == 0 else R1.record.loc[t - 1, "st"]
-
-                # - LLM Decision at the start of each month
-                if d.day == 1 and args.model != 'release-demand':
-                    print(f"    Month {mowy:>2} — requesting allocation decision")
-                    R1_agent.set_observation(
-                        idx=t, date=d, wy=wy, mowy=mowy, dowy=ty + 1, alloc_1=allocation_percent, st_1=st_1
-                    )
-                    allocation_percent, _, _ = R1_agent.make_allocation_decision(idx=t)
-
-                # current downstream demand
-                dt = R1.demand[ty]
-                # set target demand from allocation decision
-                uu = dt * allocation_percent / 100.0
-
-                # inflow
-                inflow_rows = R1.inflows.loc[
-                    (R1.inflows["water_year"] == wy)
-                    & (R1.inflows["month"] == d.month)
-                    & (R1.inflows["day"] == d.day),
-                    "inflow",
-                ]
-                if inflow_rows.empty:
-                    raise ValueError(
-                        f"Missing inflow for date={d.strftime('%Y-%m-%d')} (WY={wy})"
-                    )
-                qt = float(inflow_rows.iloc[0])
-
-                # TOCS and evaluate
-                tocs = R1.compute_tocs(dowy=ty + 1, date=d.strftime("%Y-%m-%d"))
-                rt, st = R1.evaluate(st_1=st_1, qt=qt, uu=uu, tocs=tocs)
-
-                # record the timestep
-                R1.record_timestep(
-                    idx=t, date=d, wy=wy, mowy=mowy, dowy=ty + 1, qt=qt, st=st, rt=rt, dt=dt, uu=uu
+    if args.parallel is not None and nsample > 1:
+        max_workers = args.parallel or nsample
+        print(f"\nRunning {nsample} samples in parallel (max_workers={max_workers})")
+        futures = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for n in range(nsample):
+                future = executor.submit(
+                    run_single_sample,
+                    n, args, resolved_model_config, model,
+                    R1_characteristics, file_dir, print_lock,
                 )
-
-                # increment timestep
-                t += 1
-
-                # Save outputs at the end of each month
-                if d.day == date_range[date_range.month == d.month][-1].day:
-                    # Calculate the start index of the current month
-                    days_in_current_month = (date_range.month == d.month).sum()
-                    month_start_idx = t - days_in_current_month
-                    
-                    # Append only the current month's records
-                    R1.record.loc[month_start_idx:t].dropna().to_csv(
-                        simulation_output_file, index=False, mode='a', 
-                        header=not os.path.exists(simulation_output_file)
-                    )
-                    if args.model != "release-demand":
-                        R1_agent.record.loc[month_start_idx:t].dropna(
-                            subset=["allocation_percent"]
-                        ).to_csv(
-                            decision_output_file, quotechar='"', index=False, mode='a',
-                            header=not os.path.exists(decision_output_file)
-                        )
-                    logprobs_df = R1_agent.pop_logprobs_record()
-                    if not logprobs_df.empty:
-                        logprobs_df.to_csv(
-                            logprobs_output_file, index=False, mode='a',
-                            header=not os.path.exists(logprobs_output_file)
-                        )
-
-        # Outputs are already saved incrementally at the end of each month
-        print("Simulation complete")
+                futures[future] = n
+            for future in as_completed(futures):
+                n = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    print(f"\n[n={n}] Sample failed with error: {exc}")
+                    raise
+    else:
+        for n in range(nsample):
+            run_single_sample(
+                n, args, resolved_model_config, model,
+                R1_characteristics, file_dir, print_lock,
+            )
 
 
 def parse_args():
@@ -309,6 +366,18 @@ def parse_args():
         default=None,
         type=int,
         help="Include top N log probabilities in output (OpenAI 0-5, Ollama 0-20, Default: None).",
+    )
+    parser.add_argument(
+        "--parallel",
+        nargs="?",
+        const=0,
+        default=None,
+        type=int,
+        metavar="N",
+        help=(
+            "Run samples in parallel. Optionally pass N to cap the worker thread "
+            "count (Default: sequential; --parallel alone uses nsample workers)."
+        ),
     )
     return parser.parse_args()
 
