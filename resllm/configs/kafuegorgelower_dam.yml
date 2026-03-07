@@ -96,8 +96,7 @@ reservoir:
   ]
 
   # Rating curve min/max
-  rating_curve_minmax:
-  [
+  rating_curve_minmax: [
     10950000,
     62840000,
     4445.967529

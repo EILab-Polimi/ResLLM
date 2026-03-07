@@ -13,7 +13,7 @@ reservoir:
             capacity: 140 #m3/s
             efficiency: 0.51
             head: 128.9 #m
-            quantity: 6.
+            quantity: 6
 
     # Total Storage Capacity (Dead + Live)
     operable_storage_max:  193000000000 

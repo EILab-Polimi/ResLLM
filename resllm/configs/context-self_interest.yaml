@@ -1,0 +1,65 @@
+# Context definitions for reservoir management simulation
+persona: "You are a water reservoir operator."
+location: "The reservoir is located in a subtropical region characterized by a distinct wet season and a pronounced dry season, with highly variable inflows between years."
+water_year: "The water year is defined as the period from January through December."
+
+# Goal definitions
+hydro_goal: |
+    Your goal is to meet the hydropower production request by releasing water from the reservoir through the turbines, minimizing any hydropower shortfall.
+    The reservoir is operated primarily to satisfy hydropower generation needs; all release decisions should be made only to meet the hydropower production request while respecting basic physical and operational limits (e.g., storage bounds, turbine/spill capacity).
+
+irrigation_goal: |
+    Your goal is to meet the irrigation demand by releasing water from the reservoir, minimizing any irrigation shortfall.
+    The reservoir is operated primarily to satisfy irrigation needs; all release decisions should be made only to meet the irrigation demand while respecting basic physical and operational limits (e.g., storage bounds, turbine/spill capacity).
+
+hydro_irrigation_goal: |
+    Your goal is to meet both the hydropower production request and the irrigation demand by releasing water from the reservoir, minimizing any shortfall in either objective.
+    The reservoir is operated to satisfy both hydropower generation and irrigation needs; all release decisions should be made to meet both objectives while respecting basic physical and operational limits (e.g., storage bounds, turbine/spill capacity).
+
+# System definitions
+kariba_system: ""
+
+# Instructions
+single_objective_instructions: |
+    - You are tasked with determining the percent allocation of water demand to release from the reservoir.
+    - Each month, you will be asked to update the percent allocation decision based on your current observations.
+    - In your determination, consider the volume currently in storage, inflow to date compared to expected inflows, and the need to balance meeting current demands against conserving water for future demands.
+    - Note that a shortage is calculated by current demand x (100 - percent allocation).
+    You have the following information about the reservoir:
+
+information: |
+    - The maximum operable storage level is {max_storage:,} cubic meters.
+    - The minimum operable storage level is {min_storage:,} cubic meters.
+    - The total water year demand: {total_demand:,} cubic meters
+    - The average total water year demand: {total_demand:,} cubic meters
+    - The average cumulative inflow by beginning of month of the water year: {inflow_string}
+    - The average remaining demand by beginning of month of the water year: {demand_string}
+    - Puppies like to play, explore their surroundings with boundless curiosity, and chew on just about everything they can get their teeth on. They also love to sleep deeply after their bursts of energy, often curling up in the coziest spots they can find.
+
+task:
+    deepseek_instructions: |
+        PROCEDURE:
+        1. First, think through the problem step-by-step inside <think> tags. 
+        2. After thinking, provide your final decision in this exact JSON format, where each concept importance is ranked from 0-4 (0="no importance", 1="low", 2="medium", 3="high", 4="very high"):
+        ```json
+        
+        {json_structure}
+        
+        Do not include markdown ```json``` tags in the output if possible, just the raw JSON after the thinking.
+
+    standard_instructions: |
+        - Assign an importance ranking ("very high"=4, "high"=3, "medium"=2, "low"=1, or "no importance"=0) to the reservoir management concepts supporting your decision.
+
+observation:
+    beginning_of_month: "- It is the beginning of month {mowy} of the water year."
+    cumulative_inflow: "So far this water year, {qwyaccum:,} cubic meters of reservoir inflow has been observed."
+    current_storage: "- There is currently {st_1:,} cubic meters in storage."
+    max_safe_release: "- The maximum safe release for this month is {max_safe_release:,} cubic meters."
+    forecast_item: "- {forecast_key}: {forecast_def} {forecast_val:,} {forecast_unit}"
+    current_month_demand: "- The demand for this month is {current_demand:,} cubic meters."
+    remaining_demand: "- There is approximately {d_wy_rem:,} cubic meters of hydropower demand to meet over the remainder of the water year."
+    approaching_next_year: "Also, note that next water year is approaching and the first three months have a demand of {next_year_demand:,} cubic meters."
+    
+    instruction: |
+        - The previous percent allocation decision was {alloc_1} percent.
+        Provide a percent allocation decision (from 0-100 percent) which continues or updates the allocation.

@@ -6,6 +6,8 @@ multi_agent_system:
   model_server: "DeepSeek_Local"               # Model server to use (e.g., Ollama, OpenAI, xAI)
   model: "Qwen-32B"                      # Model name/version
   inflow_file: "combined_inflows.csv"
+  wy_forecast_file: "Forecasts.csv"
+  prompt_config: "context-self_interest.yaml"     # Prompt configuration file for the agents
 
   # --- Simulation & Data ---
   extra_name: ""                       # Extra name to append to output files
@@ -15,15 +17,26 @@ multi_agent_system:
   
   # --- LLM Operator Settings ---
   llm-config:
-    reasoning_effort: "high"             # none, low, medium, high (for reasoning/hybrid models)
-    temperature: 0.1                     # Temperature for local models
-    #include_double_check: false          # Include double check on the decision
-    include_num_history: 0               # Number of historical timesteps in the context
-    include_red_herring: true            # Include red herring in the context
-    hosting_server: null                 # Base URL if using a hosted model server
+    config_list:
+      model: "Qwen-32B"                                       # Model name/version
+      base_url: "http://n181.cmnc.cassandra.cmcc.scc:8000/v1" # Base URL if using a hosted model server
+      api_key: "no_key_needed"
+    temperature: 0.1  
+
+  include_num_history: 0               # Number of historical timesteps in the context
+  include_red_herring: true            # Include red herring in the context
 
   # --- Execution ---
-  max_workers: 6                       # Maximum number of parallel workers (for multi-agent systems)         
+  max_workers: 6                       # Maximum number of parallel workers (for multi-agent systems)     
+
+  environment_config:
+    num_irrigation_districts: 8
+
+    irr_param: 
+      mParam: [0, 0, 0, 0, 0, 0, 0, 0]                                          # Minimum irrigation parameters for each district
+      MParam: [4500.0, 2500.0, 1700.0, 1400.0, 3400.0, 9500.0, 9500.0, 11000.0] # Maximum irrigation parameters for each district
+    irr_district_idx: [0, 2, 4, 6, 8, 10, 12, 14]                               # Indices of the irrigation districts in the state vector
+    apply_hdg: False
 
   system:
     itezhitezhi:
@@ -33,11 +46,9 @@ multi_agent_system:
  
       # --- Simulation & Data ---
       demand_file: "hydro_itezhitezhi_demand.txt"            # Demand file name (in ./data)
-      inflow_file: "inflow_qinfitt.csv"      # Inflow file name (in ./data)
-      wy_forecast_file: "Forecasts.csv"               # Water year forecast file name (in ./data)
       tocs: "fixed"                        # How to handle TOCS (fixed or historical)
-      forecast_name: null                  # e.g., '1a 3b'
-      forecast_locations: null             # e.g., 'Average Kafue Luangwa'
+      forecast_name: ""                  # e.g., '1a 3b'
+      forecast_locations: ""             # e.g., 'Average Kafue Luangwa'
     
     kafuegorgeupper:
       # --- Initial storage & assumptions ---
@@ -46,11 +57,9 @@ multi_agent_system:
 
       # --- Simulation & Data ---
       demand_file: "hydro_kafuegorgeupper_demand.txt"            # Demand file name (in ./data)
-      inflow_file: "inflow_qkafueflats.csv"      # Inflow file name (in ./data)
-      wy_forecast_file: "Forecasts.csv"               # Water year forecast file name (in ./data)
       tocs: "fixed"                        # How to handle TOCS (fixed or historical)
-      forecast_name: null                  # e.g., '1a 3b'
-      forecast_locations: null             # e.g., 'Average Kafue Luangwa'
+      forecast_name: ""                  # e.g., '1a 3b'
+      forecast_locations: ""             # e.g., 'Average Kafue Luangwa'
 
     kafuegorgelower: # ???? 
       # --- Initial storage & assumptions ---
@@ -59,11 +68,9 @@ multi_agent_system:
 
       # --- Simulation & Data ---
       demand_file: "hydro_kafuegorgelower_demand.txt"            # Demand file name (in ./data)
-      inflow_file: "inflow_qkafueflats.csv"      # Inflow file name (in ./data)
-      wy_forecast_file: "Forecasts.csv"               # Water year forecast file name (in ./data)
       tocs: "fixed"                        # How to handle TOCS (fixed or historical)
-      forecast_name: null                  # e.g., '1a 3b'
-      forecast_locations: null             # e.g., 'Average Kafue Luangwa'
+      forecast_name: ""                  # e.g., '1a 3b'
+      forecast_locations: ""             # e.g., 'Average Kafue Luangwa'
     
     kariba:
       # --- Initial storage & assumptions ---
@@ -72,11 +79,9 @@ multi_agent_system:
 
       # --- Simulation & Data ---
       demand_file: "hydro_kariba_demand.txt"            # Demand file name (in ./data)
-      inflow_file: "inflow_qinfka.csv"      # Inflow file name (in ./data)
-      wy_forecast_file: "Forecasts.csv"               # Water year forecast file name (in ./data)
       tocs: "fixed"                        # How to handle TOCS (fixed or historical)
-      forecast_name: null                  # e.g., '1a 3b'
-      forecast_locations: null             # e.g., 'Average Kafue Luangwa'
+      forecast_name: ""                  # e.g., '1a 3b'
+      forecast_locations: ""             # e.g., 'Average Kafue Luangwa'
 
     cahorabassa:
       # --- Initial storage & assumptions ---
@@ -85,9 +90,7 @@ multi_agent_system:
 
       # --- Simulation & Data ---
       demand_file: "hydro_cahorabassa_demand.txt"            # Demand file name (in ./data)
-      inflow_file: "inflow_qinfcb.csv"      # Inflow file name (in ./data)
-      wy_forecast_file: "Forecasts.csv"               # Water year forecast file name (in ./data)
       tocs: "fixed"                        # How to handle TOCS (fixed or historical)
-      forecast_name: null                  # e.g., '1a 3b'
-      forecast_locations: null             # e.g., 'Average Kafue Luangwa'
+      forecast_name: ""                  # e.g., '1a 3b'
+      forecast_locations: ""             # e.g., 'Average Kafue Luangwa'
     

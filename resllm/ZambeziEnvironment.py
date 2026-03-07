@@ -87,7 +87,7 @@ class ZambeziEnvironment:
 
         # Initialize the policy based on your config file arrays
         self.irr_policy = IrrigationPolicy(
-            num_irr=config['irr_param']['num_irr'],
+            num_irr=config['num_irrigation_districts'],
             min_params=config['irr_param']['mParam'],
             max_params=config['irr_param']['MParam']
         )
