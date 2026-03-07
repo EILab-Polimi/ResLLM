@@ -6,8 +6,13 @@ import pandas as pd
 import os
 import json
 import random
-from src.agents import ReservoirAgent
-from src.ZambeziEnvironment import ZambeziEnvironment
+from reservoirAgent import ReservoirAgent
+from ZambeziEnvironment import ZambeziEnvironment
+from src.reservoirs.kariba import Kariba
+from src.reservoirs.cahorabassa import CahoraBassa
+from src.reservoirs.itezhitezhi import Itezhitezhi
+from src.reservoirs.kafuegorgeupper import KafueGorgeUpper
+from src.reservoirs.kafuegorgelower import KafueGorgeLower
 import networkx as nx
 
 class MultiAgentZambeziSimulationRunner:
@@ -15,22 +20,25 @@ class MultiAgentZambeziSimulationRunner:
         self.config = config['multi_agent_system']
         self.max_rounds = self.config['max_rounds']
         self.simulation_number = simulation_number
-
+        self.model_and_version = [self.config['model_server'], self.config['model']]
+        
         self.current_wy = self.config['start_year']
         self.next_resume_date = None
         self.number_years = self.config['end_year'] - self.config['start_year'] + 1
         self.end_year = self.config['end_year']
         self.steps_per_year = self.config['steps_per_year']
-
+    
         self.t = 0
         self.policy = policy
         self.hydro_goal = hydro_goal
         self.irrigation_goal = irrigation_goal
 
         self.inflows = pd.read_csv(os.path.join(data_dir, self.config['inflow_file']))
-        self.records = pd.DataFrame(columns=['time_step', 'date', 'dam_name', 'inflow', 'observation', 'reply', 'commitment'])
+        self.forecasted_inflows = pd.read_csv(os.path.join(data_dir, self.config['wy_forecast_file']))
+        self.forecasted_inflows["date"] = pd.to_datetime(self.forecasted_inflows["date"])
+        self.records = pd.DataFrame(columns=['time_step', 'date', 'dam_name', 'release', 'observation', 'reply', 'commitment'])
 
-        self.define_topology()
+        self.define_topology(data_dir)
         
         if policy != 'self-interest':
             self.table_agent = autogen.UserProxyAgent(
@@ -39,16 +47,14 @@ class MultiAgentZambeziSimulationRunner:
                 max_consecutive_auto_reply=1
             )
 
-        self.environment = ZambeziEnvironment()
-        
-        # Register tools to the table
-        # This is where you map the operators' local tools to the AutoGen environment
-        for op in self.operators:
-            autogen.agentchat.register_function(
-                op.commit_action, caller=op.autogen_agent, executor=self.table_agent, name=f"commit_dam_{op.name}"
-            )
+        self.environment = ZambeziEnvironment(
+            H= (self.end_year - self.current_wy + 1) * self.steps_per_year,
+            integration_steps = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31],
+            integration_steps_delay = [31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 31, 28],
+            config = self.config['environment_config'],
+        )
 
-    def define_topology(self):
+    def define_topology(self, data_dir):
         self.topology = nx.DiGraph(
             [
                 ("itezhitezhi", "kafuegorgeupper"),
@@ -62,31 +68,88 @@ class MultiAgentZambeziSimulationRunner:
 
         self.operators['kariba'] = ReservoirAgent(
             name='kariba',
-            reservoir_config=self.config['system']['kariba'],
-                llm_config=self.config['system']['llm-config'],
+            reservoir_logic = Kariba(
+                name='kariba',
+                config_path=self.config['system']['kariba']['config'],
+                prompt_config=self.config['prompt_config'],
+                model_and_version=self.model_and_version,
+                policy=self.policy,
+            ),
+            data_dir=data_dir,
+            config=self.config['system']['kariba'],
+            forecasted_inflows=self.forecasted_inflows,
+            upstream_inflows=['Inflow_qInfKaLat', 'Inflow_qCuando', 'Inflow_qInfBg'],
+            llm_configs=self.config['llm-config'],
             )
-        self.operators['cahorabassa'] = ReservoirAgent(
-            name='cahorabassa',
-            reservoir_config=self.config['system']['cahorabassa'],
-                llm_config=self.config['system']['llm-config'],
-            )
+        
         self.operators['itezhitezhi'] = ReservoirAgent(
             name='itezhitezhi',
-            reservoir_config=self.config['system']['itezhitezhi'],
-                llm_config=self.config['system']['llm-config'],
-            )
-        self.operators['kafuegorgelower'] = ReservoirAgent(
-            name='kafuegorgelower',
-            reservoir_config=self.config['system']['kafuegorgelower'],
-                llm_config=self.config['system']['llm-config'],
-            )
+            reservoir_logic = Itezhitezhi(
+                name='itezhitezhi',
+                config_path=self.config['system']['itezhitezhi']['config'],
+                prompt_config=self.config['prompt_config'],
+                model_and_version=self.model_and_version,
+                policy=self.policy,
+            ),
+            data_dir=data_dir,
+            config=self.config['system']['itezhitezhi'],
+            forecasted_inflows=self.forecasted_inflows,
+            upstream_inflows=['Inflow_qInfItt'],
+            llm_configs=self.config['llm-config'],
+        )
+
         self.operators['kafuegorgeupper'] = ReservoirAgent(
             name='kafuegorgeupper',
-            reservoir_config=self.config['system']['kafuegorgeupper'],
-                llm_config=self.config['system']['llm-config'],
-            )
+            reservoir_logic = KafueGorgeUpper(
+                name='kafuegorgeupper',
+                config_path=self.config['system']['kafuegorgeupper']['config'],
+                prompt_config=self.config['prompt_config'],
+                model_and_version=self.model_and_version,
+                policy=self.policy,
+            ),
+            data_dir=data_dir,
+            config=self.config['system']['kafuegorgeupper'],
+            forecasted_inflows=self.forecasted_inflows,
+            upstream_inflows=['Inflow_qKafueFlats', 'Itezhitezhi_release'],  # Note: Delayed Itt water will be added in the step function
+            llm_configs=self.config['llm-config'],
+        )
+
+        self.operators['kafuegorgelower'] = ReservoirAgent(
+            name='kafuegorgelower',
+            reservoir_logic = KafueGorgeLower(
+                name='kafuegorgelower',
+                config_path=self.config['system']['kafuegorgelower']['config'],
+                prompt_config=self.config['prompt_config'],
+                model_and_version=self.model_and_version,
+                policy=self.policy,
+            ),
+            data_dir=data_dir,
+            config=self.config['system']['kafuegorgelower'],
+            forecasted_inflows=self.forecasted_inflows,
+            upstream_inflows=['KafueGorgeUpper_release'],  # Gets water directly from KGU's commitment
+            llm_configs=self.config['llm-config'],
+        )
+
+        self.operators['cahorabassa'] = ReservoirAgent(
+            name='cahorabassa',
+            reservoir_logic = CahoraBassa(
+                name='cahorabassa',
+                config_path=self.config['system']['cahorabassa']['config'],
+                prompt_config=self.config['prompt_config'],
+                model_and_version=self.model_and_version,
+                policy=self.policy,
+            ),
+            data_dir=data_dir,
+            config=self.config['system']['cahorabassa'],
+            forecasted_inflows=self.forecasted_inflows,
+            upstream_inflows=['Inflow_qInfCb', 'Kariba_release', 'KafueGorgeLower_release'],  # Plus water from Kariba and Kafue Gorge Lower, which will be added in the step function
+            llm_configs=self.config['llm-config'],
+        )
 
     def get_inflows_for_date(self, date):
+        print(f"Getting inflows for {date.strftime('%Y-%m-%d')}")
+        print(self.inflows.head())
+        print(self.inflows.columns)
         inflows_for_date = self.inflows[self.inflows['date'] == date]
         if inflows_for_date.empty:
             return {}
@@ -99,15 +162,15 @@ class MultiAgentZambeziSimulationRunner:
         # --- PHASE 2: THE NEGOTIATION (THE TABLE) ---
         print(f"[Sample {self.simulation_number}] Step {self.t}: Initiating negotiation for {d.strftime('%B %Y')}")
         
-        for op in self.operators:
+        for op in self.operators.values():
             op.current_commitment = None
 
-        if self.policy == 'self-interest' and self.irrigation == 'None':
-            self._isolated_step(self, ty, d, wy, mowy)
+        if self.policy == 'self-interest':
+            self._isolated_step(ty, d, wy, mowy)
         elif self.policy == 'collaborative-information-exchange':
-            self._collaborative_information_exchange_step(self, ty, d, wy, mowy)
+            self._collaborative_information_exchange_step(ty, d, wy, mowy)
         elif self.policy == 'collaborative-global':
-            self._global_optimization_step(self, ty, d, wy, mowy)
+            self._global_optimization_step(ty, d, wy, mowy)
         else:
             raise ValueError(f"Unknown policy: {self.policy}")
         
@@ -135,13 +198,20 @@ class MultiAgentZambeziSimulationRunner:
             else:
                 raise ValueError(f"Unknown dam name: {dam_name}")
 
-            obs_msg = op.generate_observation(mowy=mowy, wy=wy, inflow=inflow)
-            reply = op.autogen_agent.generate_reply(messages=obs_msg)
+            obs_msg = op.generate_observation(
+                monthly_demands=op.get_monthly_demands(),
+                forecasts=op.get_forecasts_for_date(d),
+                mowy=mowy,
+                monthly_past_inflows=op.get_total_monthly_past_inflows(wy),
+                current_storage=op.storage,
+                max_safe_release=op.reservoir_logic.get_max_safe_release(op.storage),
+                previous_allocations=op.get_previous_allocations(num_months=1),
 
-            if op.current_commitment is not None:
-                target_releases[dam_name] = op.current_commitment
-            else:
-                raise ValueError(f"Operator for {dam_name} did not commit to a release. Check the tool execution and response parsing logic.")
+            )
+            reply = op.autogen_agent.generate_reply(messages=obs_msg)
+            print(reply)
+            
+            
             self.record_timestamp(dam_name = dam_name,inflow=inflow, observation=obs_msg, reply=reply, commitment=op.current_commitment)
 
         self.physical_step(mowy, natural_inflows, target_releases, irr_demands=None)  # Assuming no irrigation demands for now
@@ -176,7 +246,7 @@ class MultiAgentZambeziSimulationRunner:
     def run(self):
         for wy in np.arange(self.current_wy, self.end_year + 1):
             self.current_wy = wy 
-            print(f"[Sample {self.n}] Simulating water year {wy}")
+            print(f"[Sample {self.simulation_number}] Simulating water year {wy}")
 
             date_range = pd.date_range(start=f"{wy}-01-01", end=f"{wy}-12-31", freq='M')
             

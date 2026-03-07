@@ -6,8 +6,21 @@ class KafueGorgeLower(BaseReservoir):
     Overrides standard physical boundaries to use Min/Max step-logic.
     """
 
-    def __init__(self, characteristics: dict = {}):
-        super().__init__(characteristics)
+    def __init__(
+        self,
+        name,
+        config_path,
+        prompt_config,
+        model_and_version,
+        policy,
+    ):
+        super().__init__(
+            name,
+            config_path,
+            prompt_config,
+            model_and_version,
+            policy,
+        )
 
     def compute_min_release(self, S_m3):
         """

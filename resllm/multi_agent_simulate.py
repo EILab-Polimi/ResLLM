@@ -7,7 +7,7 @@ import yaml
 from concurrent.futures import ThreadPoolExecutor
 
 # resllm multi-agent imports
-from src.simulator import MultiAgentZambeziSimulationRunner
+from multi_agent_simulation import MultiAgentZambeziSimulationRunner
 # dotenv imports
 from dotenv import load_dotenv
 load_dotenv(verbose=True)
@@ -35,6 +35,9 @@ def run_simulation_wrapper(n, args, config, data_dir):
 def main():
     print("Starting Multi-Agent Zambezi Reservoir Simulation...")
     args = parse_args()
+
+    if not args.hydro_goal and not args.irrigation_goal:
+        raise ValueError("At least one of --hydro-goal or --irrigation-goal must be True.")
 
     file_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(file_dir, "..", "data")
@@ -97,12 +100,12 @@ def parse_args():
     )
     parser.add_argument(
         "--hydro-goal", 
-        action='True', 
+        default=True, 
         help="Whether the agents prioritize hydroelectric power generation as their main goal."
     )
     parser.add_argument(
         "--irrigation-goal", 
-        action='False', 
+        default=False, 
         help="Whether the agents prioritize irrigation as their main goal."
     )
     return parser.parse_args()

@@ -75,20 +75,6 @@ concept_map = {
     "puppies": "<rank 0-4>"
 }
 
-prompt_procedure_text ="""
-    \n\n----------------
-    PROCEDURE:
-    1. First, think through the problem step-by-step inside <think> tags. 
-    2. After thinking, provide your final decision in this exact JSON format, where each concept importance is ranked from 0-4 (0="no importance", 1="low", 2="medium", 3="high", 4="very high"):
-    ```json
-    """
-
-prompt_closure_text = """
-    ```
-    Do not include markdown ```json``` tags in the output if possible, just the raw JSON after the thinking.
-                            
-    """
-
 import numpy as np
 import calendar
 

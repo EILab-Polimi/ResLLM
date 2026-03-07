@@ -7,9 +7,22 @@ class KafueGorgeUpper(BaseReservoir):
     Introduces a volumetric safety cap to its max release to protect dead storage.
     """
 
-    def __init__(self, characteristics: dict = {}):
-        super().__init__(characteristics)
-
+    def __init__(
+        self,
+        name,
+        config_path,
+        prompt_config,
+        model_and_version,
+        policy,
+    ):
+        super().__init__(
+            name,
+            config_path,
+            prompt_config,
+            model_and_version,
+            policy,
+        )
+        
     def compute_max_release(self, S_m3):
         """
         Overrides the base method.

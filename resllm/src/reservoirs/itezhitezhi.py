@@ -1,6 +1,6 @@
 import numpy as np
 from src.reservoirs.baseReservoir import BaseReservoir
-import utils
+import src.utils
 
 class Itezhitezhi(BaseReservoir):
     """
@@ -9,8 +9,21 @@ class Itezhitezhi(BaseReservoir):
     Overrides actual_release_daily to implement "No Flow Augmentation" MEF logic.
     """
 
-    def __init__(self, characteristics: dict = {}):
-        super().__init__(characteristics)
+    def __init__(
+        self,
+        name,
+        config_path,
+        prompt_config,
+        model_and_version,
+        policy,
+    ):
+        super().__init__(
+            name,
+            config_path,
+            prompt_config,
+            model_and_version,
+            policy,
+        )
 
     def actual_release_daily(self, desired_release_m3s, S_m3, cmonth, n_sim_m3s, mef_m3s):
         """
