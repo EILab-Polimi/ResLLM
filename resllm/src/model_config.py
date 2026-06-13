@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 import os
 
 
-SUPPORTED_MODEL_SERVERS = {"Ollama", "Google", "OpenAI", "xAI", "Mistral", "Baseten"}
+SUPPORTED_MODEL_SERVERS = {"Ollama", "OpenAI"}
 REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high"}
 
 # OpenAI model families that do NOT support the Responses API reasoning
@@ -27,7 +27,6 @@ class RunIntent:
     model: str
     reasoning_effort: str | None = "high"
     temperature: float | None = None
-    include_logprobs: int | None = None
 
 
 @dataclass
@@ -37,7 +36,6 @@ class ResolvedModelConfig:
     model_server: str
     model: str
     model_kwargs: dict
-    top_logprobs: int | None = None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -93,27 +91,8 @@ def resolve_model_config(intent: RunIntent, env: dict | None = None) -> Resolved
     if intent.model_server not in SUPPORTED_MODEL_SERVERS:
         raise ValueError(f"Unsupported model server: {intent.model_server}")
 
-    if intent.include_logprobs is not None and intent.include_logprobs < 0:
-        raise ValueError("--include-logprobs must be >= 0")
-
     env_values = os.environ if env is None else env
     warnings: list[str] = []
-
-    logprobs_supported = intent.model_server in ("OpenAI", "Ollama")
-    top_logprobs: int | None = intent.include_logprobs if logprobs_supported else None
-    if intent.include_logprobs is not None and not logprobs_supported:
-        warnings.append("--include-logprobs is only supported for OpenAI and Ollama and will be ignored.")
-
-    if (
-        intent.model_server == "Ollama"
-        and intent.include_logprobs is not None
-        and (intent.model.endswith("-cloud") or intent.model.endswith(":cloud"))
-    ):
-        warnings.append(
-            "Ollama Cloud models do not support logprobs — "
-            "logprobs will be ignored."
-        )
-        top_logprobs = None
 
     normalized_effort = _normalize_reasoning_effort(intent.reasoning_effort)
 
@@ -130,16 +109,6 @@ def resolve_model_config(intent: RunIntent, env: dict | None = None) -> Resolved
             "think": think_value,
             "timeout": 3600,
         }
-
-    elif intent.model_server == "Google":
-        include_thoughts = normalized_effort is not None and normalized_effort != "none"
-        model_kwargs = {
-            "api_key": env_values.get("GOOGLE_API_KEY"),
-            "temperature": intent.temperature,
-            "include_thoughts": include_thoughts,
-        }
-        if include_thoughts:
-            model_kwargs["thinking_level"] = normalized_effort
 
     elif intent.model_server == "OpenAI":
         model_kwargs = {
@@ -167,66 +136,9 @@ def resolve_model_config(intent: RunIntent, env: dict | None = None) -> Resolved
                 )
                 model_kwargs.pop("temperature", None)
 
-    elif intent.model_server == "xAI":
-        model_kwargs = {
-            "api_key": env_values.get("XAI_API_KEY"),
-            "temperature": intent.temperature,
-        }
-        if normalized_effort is not None and normalized_effort != "none":
-            warnings.append(
-                f"xAI does not support reasoning effort — "
-                f"ignoring --reasoning-effort {intent.reasoning_effort}."
-            )
-
-    elif intent.model_server == "Mistral":
-        model_kwargs = {
-            "api_key": env_values.get("MISTRAL_API_KEY"),
-            "temperature": intent.temperature,
-        }
-        if normalized_effort is not None and normalized_effort != "none":
-            warnings.append(
-                f"Mistral does not support reasoning effort — "
-                f"ignoring --reasoning-effort {intent.reasoning_effort}."
-            )
-
-    elif intent.model_server == "Baseten":
-        model_kwargs = {
-            "api_key": env_values.get("BASETEN_API_KEY"),
-            "temperature": intent.temperature,
-        }
-        if normalized_effort is not None and normalized_effort != "none":
-            baseten_effort = "low" if normalized_effort == "minimal" else normalized_effort
-            model_kwargs["reasoning"] = {"effort": baseten_effort}
-
-    # Ollama allows 0-20; OpenAI allows 0-5 (clamped at call time)
-    if top_logprobs is not None and intent.model_server == "Ollama":
-        if top_logprobs > 20:
-            warnings.append(f"Ollama top_logprobs clamped from {top_logprobs} to 20 (API maximum).")
-            top_logprobs = 20
-    if top_logprobs is not None and intent.model_server == "OpenAI":
-        if top_logprobs > 5:
-            warnings.append(f"OpenAI top_logprobs clamped from {top_logprobs} to 5 (API maximum).")
-            top_logprobs = 5
-
-    # Warn when OpenAI logprobs are requested with reasoning — the logprobs
-    # operator does not pass reasoning params, so hybrid models (e.g. gpt-5.2)
-    # will default to non-reasoning mode.
-    if (
-        top_logprobs is not None
-        and intent.model_server == "OpenAI"
-        and normalized_effort is not None
-        and normalized_effort != "none"
-    ):
-        warnings.append(
-            f"--include-logprobs with OpenAI uses a separate operator that does not send "
-            f"reasoning params. Hybrid models (e.g. {intent.model}) will run in non-reasoning "
-            f"mode. To capture reasoning traces, re-run without --include-logprobs."
-        )
-
     return ResolvedModelConfig(
         model_server=intent.model_server,
         model=intent.model,
         model_kwargs=model_kwargs,
-        top_logprobs=top_logprobs,
         warnings=warnings,
     )

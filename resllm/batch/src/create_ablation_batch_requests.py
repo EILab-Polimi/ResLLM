@@ -13,6 +13,8 @@ import re
 import pandas as pd
 from glob import glob
 
+from schemas import RESPONSE_SCHEMA
+
 
 def split_system_and_user(observation):
     """
@@ -359,23 +361,9 @@ def main():
     # Sort observations by sample number (n0-n9) and then by date
     all_observations.sort(key=lambda x: (x['sample_num'], x['date']))
     
-    # Response schema (default)
-    response_schema = {
-        "type": "object",
-        "properties": {
-            "allocation_reasoning": {
-                "type": "string",
-                "description": "A brief justification of the percent allocation decision."
-            },
-            "allocation_percent": {
-                "type": "number",
-                "description": "The percent allocation to release from the reservoir."
-            },
-        },
-        "required": ["allocation_reasoning", "allocation_percent"],
-        "additionalProperties": False
-    }
-    
+    # Response schema (default) — shared with create_batch_requests.py
+    response_schema = RESPONSE_SCHEMA
+
     # Generic response schema for bare_minimal (no reservoir mention)
     bare_minimal_schema = {
         "type": "object",

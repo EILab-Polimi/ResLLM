@@ -23,8 +23,8 @@ python simulate.py \
 
 | Argument | Description |
 |----------|-------------|
-| `--model-server` | LLM provider (e.g., `Ollama`, `OpenAI`, `Google`) |
-| `--model` | Model identifier (e.g., `kimi-k2-thinking:cloud`, `o4-mini-2025-04-16`) |
+| `--model-server` | LLM provider: `Ollama` or `OpenAI` |
+| `--model` | Model identifier (e.g., `gpt-oss:120b-cloud`, `o4-mini-2025-04-16`) |
 | `--config` | Configuration YAML in `configs/` (e.g., `folsom.yml`) |
 | `--start-year` | First water year (October–September) |
 | `--end-year` | Last water year |
@@ -39,7 +39,6 @@ python simulate.py \
 | `--tocs` | `fixed` | TOCS mode: `fixed` (seasonal curve) or `historical` (max of curve and observed) |
 | `--wy-forecast-file` | `None` | Probabilistic forecast file (enables forecast context) |
 | `--reasoning-effort` | `high` | Reasoning level for supported models |
-| `--include-logprobs` | `None` | Request top-N token logprobs (`OpenAI`: 0–5, `Ollama`: 0–20) |
 | `--include-red-herring` | `True` | Include irrelevant text to test focus |
 | `--debug-response` | `False` | Save raw model responses for inspection |
 
@@ -62,12 +61,11 @@ python simulate.py \
 
 ## Model Configuration
 
-Provider-specific settings are resolved centrally in [src/model_config.py](src/model_config.py). CLI arguments (`--model-server`, `--model`, `--reasoning-effort`, `--temperature`, `--include-logprobs`) are captured as a `RunIntent` and resolved into a `ResolvedModelConfig` with validated kwargs, capability flags, and warnings.
+Provider-specific settings are resolved centrally in [src/model_config.py](src/model_config.py). CLI arguments (`--model-server`, `--model`, `--reasoning-effort`, `--temperature`) are captured as a `RunIntent` and resolved into a `ResolvedModelConfig` with validated kwargs and warnings.
 
 Key behaviors:
-- **Reasoning effort** accepts `none`, `minimal`, `low`, `medium`, `high`. The value is normalized per provider; `minimal` is mapped to `low` where unsupported. Providers that lack reasoning support (xAI, Mistral) emit a warning and ignore the flag.
+- **Reasoning effort** accepts `none`, `minimal`, `low`, `medium`, `high`. The value is normalized per provider; `minimal` is mapped to `low` where unsupported. OpenAI non-reasoning model families (`gpt-4.1`, `gpt-4o`, `gpt-4-`) emit a warning and run via Chat Completions without reasoning.
 - **Ollama cloud vs local**: Models ending in `-cloud` or `:cloud` receive effort strings (`low`/`medium`/`high`) for the `think` parameter; local models receive a boolean (`none` → `False`, all others including default → `True`).
-- **Logprobs** (`--include-logprobs N`): Ollama local supports 0–20, OpenAI supports 0–5. Cloud Ollama models and all other providers ignore the flag with a warning. **OpenAI logprobs are mutually exclusive with reasoning** — logprobs use a separate Chat Completions operator that does not pass reasoning params, so reasoning models fall back to non-reasoning mode.
 
 ---
 
@@ -77,24 +75,8 @@ Reasoning traces (`model_reasoning`) capture the model's chain-of-thought when a
 
 | Provider | Method | Notes |
 |----------|--------|-------|
-| Ollama | Native `think` parameter | Streams thinking text; compatible with logprobs |
+| Ollama | Native `think` parameter | Streams thinking text chunk-by-chunk |
 | OpenAI | Responses API summaries | Reasoning models only; non-reasoning prefixes (`gpt-4.1`, `gpt-4o`, `gpt-4-`) use Chat Completions instead |
-| Google | `ThinkingConfig` | Extracted from response parts where `thought=True` |
-| Baseten | Chat Completions `reasoning_effort` | Enables thinking for compatible models |
-| xAI / Mistral | Not supported | — |
-
----
-
-## Token Logprobs
-
-Token-level log probabilities for the `allocation_percent` value are requested via `--include-logprobs N` and written to `<model>_r-<effort>_logprobs_output_n<N>.csv`.
-
-| Provider | Range | Notes |
-|----------|-------|-------|
-| Ollama (local) | 0–20 | Compatible with reasoning; logprobs and thinking coexist in the same call |
-| OpenAI | 0–5 | Uses a dedicated non-reasoning operator (see Logprobs note above) |
-
-For Ollama local models, numeric values are often tokenized as individual digits (e.g., `85` → `["8", "5"]`). The output includes `n_value_tokens`, `value_tokens`, `joint_logprob`, and `joint_prob` columns that aggregate across all constituent tokens. The per-candidate columns (`top1_*`, …) report raw first-digit token probabilities only.
 
 ---
 
@@ -105,10 +87,9 @@ Simulations write to [output/](output/). Filenames encode the model name and rea
 ```
 <model>_r-<effort>_simulation_output_n<N>.csv
 <model>_r-<effort>_decision_output_n<N>.csv
-<model>_r-<effort>_logprobs_output_n<N>.csv     # only when --include-logprobs is set
 ```
 
-Where `<model>` is the sanitized model ID (colons → hyphens, slashes → underscores) and `<effort>` is the `--reasoning-effort` value (default `high`). For example, `kimi-k2-thinking-cloud_r-high_simulation_output_n0.csv`.
+Where `<model>` is the sanitized model ID (colons → hyphens, slashes → underscores) and `<effort>` is the `--reasoning-effort` value (default `high`). For example, `gpt-oss-120b-cloud_r-high_simulation_output_n0.csv`.
 
 ### Simulation Output
 
@@ -211,7 +192,7 @@ The example data uses California's Folsom Reservoir, but you can substitute any 
 ```
 src/
 ├── reservoir.py     # Reservoir class (mass balance, TOCS, constraints)
-├── operator.py      # LLM operators (native provider APIs + logprobs)
+├── operator.py      # LLM operators (OpenAI + Ollama native APIs)
 ├── prompts.py       # All prompt templates and builder functions
 ├── model_config.py  # Centralized provider config resolver
 └── utils.py         # Unit conversions, date utilities
@@ -219,10 +200,9 @@ src/
 
 ### Operator Classes
 
-- **`BaseReservoirOperator`** — Shared observation-setting, decision-recording, and `pop_logprobs_record()` logic.
-- **`ReservoirAllocationOperator`** — Multi-provider operator using native APIs (OpenAI, Google, Ollama, xAI, Mistral). Supports reasoning traces and Ollama logprobs.
-- **`OpenAIReservoirOperator`** — OpenAI Chat Completions operator specifically for logprobs extraction (OpenAI's Chat Completions API supports `top_logprobs` up to 5).
-- **`build_operator()`** — Factory that selects the right operator class based on `ResolvedModelConfig`.
+- **`BaseReservoirOperator`** — Shared observation-setting and decision-recording logic.
+- **`ReservoirAllocationOperator`** — Operator using native provider APIs (OpenAI and Ollama). Supports reasoning traces. OpenAI reasoning models use the Responses API; non-reasoning models use Chat Completions; Ollama uses the streaming `generate` endpoint.
+- **`build_operator()`** — Factory that constructs the operator from a `ResolvedModelConfig`.
 
 ### Prompt Construction
 

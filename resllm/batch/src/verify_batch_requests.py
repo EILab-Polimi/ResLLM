@@ -84,11 +84,7 @@ def verify_batch_requests(batch_file, metadata_file):
         # Check response format
         if "response_format" not in body:
             errors.append(f"Request {i}: Missing response_format")
-        
-        # Check reasoning (optional - only for some models/endpoints)
-        # if "reasoning" not in body or body["reasoning"].get("effort") != "high":
-        #     errors.append(f"Request {i}: Missing or invalid reasoning config")
-    
+
     if errors:
         print(f"   ❌ Found {len(errors)} errors:")
         for error in errors[:10]:  # Show first 10 errors

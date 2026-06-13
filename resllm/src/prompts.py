@@ -13,9 +13,22 @@ from textwrap import dedent
 # =============================================================================
 
 
-SYSTEM_MESSAGE_BASE = dedent("""\
+OBJECTIVE_MINIMIZE_SHORTAGES = (
+    "Your goal is to minimize shortages to downstream water supply by releasing water from the reservoir."
+)
+
+OBJECTIVE_MINIMIZE_LARGE_SHORTAGES_CARRYOVER = (
+    "Your goal is to minimize large shortages to downstream water supply and avoid low end of year carryover storage."
+)
+
+OBJECTIVES: dict[str, str] = {
+    "minimize-shortages": OBJECTIVE_MINIMIZE_SHORTAGES,
+    "minimize-large-shortages-carryover": OBJECTIVE_MINIMIZE_LARGE_SHORTAGES_CARRYOVER,
+}
+
+_SYSTEM_MESSAGE_TEMPLATE = dedent("""\
     You are a water reservoir operator.
-    Your goal is to minimize shortages to downstream water supply by releasing water from the reservoir.
+    {objective}
     The reservoir is located in a region with a Mediterranean climate, characterized by hot, dry summers and highly variable wet winters.
     The reservoir is operated to meet the municipal and agricultural water supply needs of the region while also maintaining flood control and environmental flow requirements.
     The water year is defined as the period from October through September.
@@ -129,13 +142,31 @@ OLLAMA_JSON_INSTRUCTION = (
 # HELPER FUNCTIONS
 # =============================================================================
 
-def build_system_message() -> str:
-    """Build the system message."""
-    return SYSTEM_MESSAGE_BASE
+def build_system_message(objective: str = "minimize-shortages") -> str:
+    """Build the system message.
+
+    Args:
+        objective: Key from OBJECTIVES dict controlling the goal sentence.
+    """
+    if objective not in OBJECTIVES:
+        raise ValueError(f"Unknown objective '{objective}'. Choose from: {list(OBJECTIVES)}")
+    return _SYSTEM_MESSAGE_TEMPLATE.format(objective=OBJECTIVES[objective])
 
 
-def build_instructions(reservoir, include_red_herring: bool = False) -> str:
-    """Build the full instruction string based on reservoir characteristics."""
+def build_instructions(
+    reservoir,
+    include_red_herring: bool = False,
+    include_importance_ranking: bool = True,
+) -> str:
+    """Build the full instruction string based on reservoir characteristics.
+
+    Args:
+        reservoir: Reservoir (or shim) exposing a ``characteristics`` dict.
+        include_red_herring: Append the puppies ablation text.
+        include_importance_ranking: Append the concept importance-ranking
+            instruction. Disable for the batch ablation pipeline, which uses
+            a reduced schema without ``allocation_concept_importance``.
+    """
     instructions = INSTRUCTIONS_BASE.format(
         operable_storage_max=reservoir.characteristics["operable_storage_max"],
         operable_storage_min=reservoir.characteristics["operable_storage_min"],
@@ -167,7 +198,8 @@ def build_instructions(reservoir, include_red_herring: bool = False) -> str:
     if include_red_herring:
         instructions += INSTRUCTIONS_RED_HERRING
 
-    instructions += INSTRUCTIONS_IMPORTANCE_RANKING
+    if include_importance_ranking:
+        instructions += INSTRUCTIONS_IMPORTANCE_RANKING
 
     return instructions
 

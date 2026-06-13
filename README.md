@@ -12,9 +12,9 @@ cd ResLLM
 conda env create -f environment.yml
 conda activate llm
 
-# For cloud APIs, create a .env file
+# For the OpenAI API, create a .env file
 cp .env.example .env
-# Add provider keys as needed: OPENAI_API_KEY, GOOGLE_API_KEY, XAI_API_KEY, MISTRAL_API_KEY
+# Add your key: OPENAI_API_KEY (Ollama runs locally and needs no key)
 ```
 
 ## Quick Start

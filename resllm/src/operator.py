@@ -10,10 +10,9 @@ on current storage, inflows, and remaining demand.
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
-from typing import NamedTuple, TypedDict
+from typing import TypedDict
 
 import pandas as pd
 from openai import OpenAI
@@ -70,14 +69,6 @@ class AllocationDecision(BaseModel):
     allocation_concept_importance: OperationalConcepts
 
 
-class DecisionResult(NamedTuple):
-    """Return type for ``make_allocation_decision``."""
-
-    allocation_percent: float
-    justification: str
-    concept_importance: dict[str, int]
-
-
 # =============================================================================
 # Base Operator
 # =============================================================================
@@ -91,11 +82,12 @@ class BaseReservoirOperator:
         model_id: str,
         *,
         include_red_herring: bool = False,
+        objective: str = "minimize-shortages",
     ):
         if reservoir is None:
             raise ValueError("reservoir cannot be None")
         self.reservoir = reservoir
-        self.system_message = build_system_message()
+        self.system_message = build_system_message(objective)
         self.instructions = build_instructions(reservoir, include_red_herring)
         self.observation: str | None = None
         self.record = pd.DataFrame()
@@ -175,21 +167,6 @@ class BaseReservoirOperator:
         for key, value in decision.allocation_concept_importance.items():
             self.record.loc[idx, key] = value
 
-    def act(self, allocation_percent: float, idx: int = 0):
-        """Execute the allocation decision (updates reservoir state)."""
-        release = self.reservoir.demand[idx] * allocation_percent / 100
-        self.record.loc[idx, "release"] = release
-
-    def pop_logprobs_record(self) -> pd.DataFrame:
-        """Return and clear accumulated logprobs records.
-
-        Subclasses that populate ``self.logprobs_record`` get real data;
-        the base class returns an empty DataFrame.
-        """
-        df = getattr(self, "logprobs_record", pd.DataFrame()).copy()
-        self.logprobs_record = pd.DataFrame()
-        return df
-
 
 # =============================================================================
 # Provider call helpers
@@ -210,12 +187,6 @@ def _with_retries(fn, *, label: str):
     raise RuntimeError(
         f"{label} API call failed after {_MAX_RETRIES} attempts: {last_err}"
     ) from last_err
-
-
-# xAI and Mistral use an OpenAI-compatible endpoint
-_XAI_BASE_URL = "https://api.x.ai/v1"
-_MISTRAL_BASE_URL = "https://api.mistral.ai/v1"
-_BASETEN_BASE_URL = "https://inference.baseten.co/v1"
 
 
 def _call_openai_responses(
@@ -276,22 +247,7 @@ def _call_openai_responses(
     return AllocationDecision(**json.loads(response_text)), reasoning_text
 
 
-def _extract_think_tags(text: str) -> tuple[str, str]:
-    """Split ``<think>...</think>`` blocks from the remaining content.
-
-    Returns:
-        (thinking_text, remaining_content)
-    """
-    think_blocks: list[str] = []
-    remaining = text
-    for m in re.finditer(r"<think>(.*?)</think>", text, re.DOTALL):
-        think_blocks.append(m.group(1).strip())
-    if think_blocks:
-        remaining = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    return "\n\n".join(think_blocks), remaining
-
-
-def _call_openai_compatible(
+def _call_openai(
     client: OpenAI,
     model: str,
     system_content: str,
@@ -299,17 +255,12 @@ def _call_openai_compatible(
     temperature: float | None,
     reasoning: dict | None = None,
 ) -> tuple[AllocationDecision, str | None]:
-    """Call an OpenAI-compatible API with structured JSON output.
+    """Call OpenAI with structured JSON output.
 
-    Works for OpenAI, xAI, Mistral, and Baseten (all expose an
-    OpenAI-compatible chat completions endpoint).
-
-    For **OpenAI** with reasoning enabled, uses the **Responses API**
-    (``/v1/responses``) which supports the ``reasoning`` parameter and
-    returns reasoning summaries.  For third-party providers (or OpenAI
-    without reasoning), falls back to **Chat Completions**.  Baseten
-    reasoning calls also send ``chat_template_args`` for models that
-    require explicit thinking enablement (e.g. GLM).
+    With reasoning enabled, uses the **Responses API** (``/v1/responses``),
+    the only endpoint that accepts the ``reasoning`` parameter and returns
+    reasoning summaries.  Otherwise uses **Chat Completions** with a strict
+    ``json_schema`` response format (no reasoning trace available).
 
     Returns:
         (AllocationDecision, reasoning_text_or_None)
@@ -317,106 +268,35 @@ def _call_openai_compatible(
     schema = AllocationDecision.model_json_schema()
     _add_strict_additional_properties(schema)
 
-    # ------------------------------------------------------------------
-    # OpenAI Responses API path (supports reasoning traces)
-    # ------------------------------------------------------------------
-    is_openai_native = (
-        client.base_url is not None
-        and "api.openai.com" in str(client.base_url)
-    )
-    if is_openai_native and reasoning is not None:
+    # Reasoning models capture traces only via the Responses API.
+    if reasoning is not None:
         return _call_openai_responses(
             client, model, system_content, user_content, schema,
             temperature, reasoning,
         )
 
-    # ------------------------------------------------------------------
-    # Chat Completions path (xAI, Mistral, Baseten, or OpenAI w/o reasoning)
-    # ------------------------------------------------------------------
-    is_third_party = (
-        client.base_url is not None
-        and "api.openai.com" not in str(client.base_url)
-    )
-
-    # Third-party reasoning models cannot separate thinking tokens from
-    # content when ``response_format`` is set.  Currently only Baseten
-    # reaches this path — xAI and Mistral reasoning effort is ignored at
-    # config resolution time.  Drop structured output and parse JSON manually.
-    use_freeform = is_third_party and reasoning is not None
-
-    if use_freeform:
-        sys_content = f"{system_content}{OLLAMA_JSON_INSTRUCTION}"
-    else:
-        sys_content = system_content
-
-    messages = [
-        {"role": "system", "content": sys_content},
-        {"role": "user", "content": user_content},
-    ]
-
+    # Non-reasoning models: Chat Completions with structured output.
     api_params: dict = {
         "model": model,
-        "messages": messages,
-    }
-
-    if not use_freeform:
-        api_params["response_format"] = {
+        "messages": [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
+        ],
+        "response_format": {
             "type": "json_schema",
             "json_schema": {
                 "name": "allocation_decision",
                 "strict": True,
                 "schema": schema,
             },
-        }
-
+        },
+    }
     if temperature is not None:
         api_params["temperature"] = temperature
 
-    # Non-OpenAI providers may need an explicit max_tokens to avoid
-    # truncating long structured responses (especially with reasoning).
-    # When thinking is enabled, thinking tokens count against this limit,
-    # so we use a much larger budget for reasoning calls.
-    if is_third_party:
-        api_params["max_tokens"] = 65536 if use_freeform else 16384
-
-    # Third-party providers may accept reasoning_effort at the top level
-    if reasoning is not None and not is_openai_native:
-        effort = reasoning.get("effort")
-        extra: dict = {}
-        if effort:
-            extra["reasoning_effort"] = effort
-        # Baseten vLLM models (e.g. GLM) may require enable_thinking via
-        # chat_template_args instead of / in addition to reasoning_effort.
-        if "baseten.co" in str(client.base_url):
-            extra["chat_template_args"] = {"enable_thinking": True}
-        if extra:
-            api_params["extra_body"] = extra
-
     completion = client.chat.completions.create(**api_params)
     choice = completion.choices[0]
-    message = choice.message
-    response_text = message.content
-
-    # ------------------------------------------------------------------
-    # Reasoning trace extraction
-    # ------------------------------------------------------------------
-    reasoning_text: str | None = None
-
-    # Source 1: API-level reasoning_content (e.g. Kimi-K2-Thinking)
-    api_reasoning = (
-        getattr(message, "reasoning_content", None)
-        or getattr(message, "reasoning", None)
-        or (getattr(message, "model_extra", {}) or {}).get("reasoning_content")
-        or (getattr(message, "model_extra", {}) or {}).get("reasoning")
-    ) or None
-
-    # Source 2: <think> tags in the content (freeform mode)
-    think_text = ""
-    if response_text and use_freeform:
-        think_text, response_text = _extract_think_tags(response_text)
-
-    # Combine: prefer API-level, fall back to <think> tags
-    reasoning_text = api_reasoning or think_text or None
+    response_text = choice.message.content
 
     if not response_text:
         raise ValueError(
@@ -424,81 +304,8 @@ def _call_openai_compatible(
             f"finish_reason={choice.finish_reason}"
         )
 
-    try:
-        payload = json.loads(response_text)
-    except json.JSONDecodeError:
-        # Fall back to the robust parser that handles markdown fences / extra text
-        payload = _parse_json_response(response_text)
-
-    # Normalize keys for providers that may deviate (camelCase, fuzzy concepts)
-    payload = _normalize_decision_payload(payload)
-
-    return AllocationDecision(**payload), reasoning_text
-
-
-def _call_google(
-    model_id: str,
-    system_content: str,
-    user_content: str,
-    model_kwargs: dict,
-) -> tuple[AllocationDecision, str | None]:
-    """Call Google Gemini with structured JSON output.
-
-    Returns:
-        (AllocationDecision, thinking_text_or_None)
-    """
-    from google import genai
-    from google.genai import types
-
-    api_key = model_kwargs.get("api_key") or os.getenv("GOOGLE_API_KEY")
-    client = genai.Client(api_key=api_key)
-
-    config_args: dict = {
-        "response_mime_type": "application/json",
-        "response_schema": AllocationDecision,
-        "system_instruction": system_content,
-    }
-
-    if model_kwargs.get("temperature") is not None:
-        config_args["temperature"] = model_kwargs["temperature"]
-
-    # Thinking support
-    include_thoughts = model_kwargs.get("include_thoughts", False)
-    if include_thoughts:
-        thinking_kwargs: dict = {"include_thoughts": True}
-        thinking_level = model_kwargs.get("thinking_level")
-        if thinking_level:
-            thinking_level_map = {
-                "none": types.ThinkingLevel.THINKING_LEVEL_UNSPECIFIED,
-                "minimal": types.ThinkingLevel.MINIMAL,
-                "low": types.ThinkingLevel.LOW,
-                "medium": types.ThinkingLevel.MEDIUM,
-                "high": types.ThinkingLevel.HIGH,
-            }
-            thinking_kwargs["thinking_level"] = thinking_level_map.get(
-                thinking_level, types.ThinkingLevel.HIGH
-            )
-        config_args["thinking_config"] = types.ThinkingConfig(**thinking_kwargs)
-
-    response = client.models.generate_content(
-        model=model_id,
-        contents=user_content,
-        config=types.GenerateContentConfig(**config_args),
-    )
-
-    decision: AllocationDecision = response.parsed
-
-    # Extract thinking content
-    thinking_text: str | None = None
-    if include_thoughts and response.candidates:
-        thought_parts: list[str] = []
-        for part in response.candidates[0].content.parts:
-            if getattr(part, "thought", False) and part.text:
-                thought_parts.append(part.text.strip())
-        if thought_parts:
-            thinking_text = "\n".join(thought_parts)
-
-    return decision, thinking_text
+    # Strict structured output guarantees the schema — parse directly.
+    return AllocationDecision(**json.loads(response_text)), None
 
 
 def _call_ollama(
@@ -506,10 +313,8 @@ def _call_ollama(
     system_content: str,
     user_content: str,
     model_kwargs: dict,
-    *,
-    top_logprobs: int | None = None,
-) -> tuple[AllocationDecision, str | None, str, list | None]:
-    """Call Ollama via the generate endpoint with optional thinking and logprobs.
+) -> tuple[AllocationDecision, str | None]:
+    """Call Ollama via the generate endpoint with optional thinking.
 
     Uses ``generate`` rather than ``chat`` because thinking models often
     leave the chat ``content`` field empty.  When thinking is enabled,
@@ -517,7 +322,7 @@ def _call_ollama(
     prompt JSON instruction guides output format instead.
 
     Returns:
-        (AllocationDecision, thinking_text_or_None, raw_content_text, logprobs_data)
+        (AllocationDecision, thinking_text_or_None)
     """
     from ollama import generate
 
@@ -530,40 +335,30 @@ def _call_ollama(
         "prompt": user_content,
         "system": system_prompt,
         "think": think,
+        "stream": True,
     }
     if not is_thinking:
         kwargs["format"] = "json"
     if "temperature" in model_kwargs:
         kwargs["options"] = {"temperature": model_kwargs["temperature"]}
 
-    logprobs_data: list | None = None
-
-    if top_logprobs is not None:
-        # Non-streaming — required for logprobs
-        kwargs.update(stream=False, logprobs=True, top_logprobs=top_logprobs)
-        response = generate(**kwargs)
-        raw_text = (response.response or "").strip()
-        thinking_text = (response.thinking or "").strip() or None
-        logprobs_data = response.logprobs
-    else:
-        # Streaming — captures thinking traces chunk-by-chunk
-        kwargs["stream"] = True
-        thinking_parts: list[str] = []
-        content_parts: list[str] = []
-        for chunk in generate(**kwargs):
-            if t := getattr(chunk, "thinking", None):
-                thinking_parts.append(t)
-            if c := getattr(chunk, "response", None):
-                content_parts.append(c)
-        raw_text = "".join(content_parts).strip()
-        thinking_text = "".join(thinking_parts).strip() or None
+    # Streaming — captures thinking traces chunk-by-chunk
+    thinking_parts: list[str] = []
+    content_parts: list[str] = []
+    for chunk in generate(**kwargs):
+        if t := getattr(chunk, "thinking", None):
+            thinking_parts.append(t)
+        if c := getattr(chunk, "response", None):
+            content_parts.append(c)
+    raw_text = "".join(content_parts).strip()
+    thinking_text = "".join(thinking_parts).strip() or None
 
     # Some thinking models place everything in the thinking field
     if not raw_text and thinking_text:
         raw_text, thinking_text = _split_thinking_json(thinking_text)
 
     decision = _parse_ollama_decision(raw_text)
-    return decision, thinking_text, raw_text, logprobs_data
+    return decision, thinking_text
 
 
 def _split_thinking_json(text: str) -> tuple[str, str | None]:
@@ -782,361 +577,85 @@ class ReservoirAllocationOperator(BaseReservoirOperator):
         include_red_herring: bool = False,
         debug_response: bool = False,
         model_kwargs: dict | None = None,
-        top_logprobs: int | None = None,
+        objective: str = "minimize-shortages",
     ):
-        """Initialize the multi-provider reservoir operator.
+        """Initialize the reservoir operator.
 
         Args:
-            model_server: Provider name (OpenAI, Google, Ollama, xAI, Mistral).
+            model_server: Provider name (OpenAI or Ollama).
             model_id: Model identifier string.
             reservoir: Reservoir simulation instance.
             include_red_herring: Whether to include ablation text in instructions.
             debug_response: Capture raw model response payloads for inspection.
             model_kwargs: Provider-specific model keyword arguments.
-            top_logprobs: Number of top logprobs to request, or None to disable.
+            objective: Goal sentence key from prompts.OBJECTIVES.
         """
-        super().__init__(reservoir, model_id, include_red_herring=include_red_herring)
+        super().__init__(reservoir, model_id, include_red_herring=include_red_herring, objective=objective)
 
         self.model_server = model_server
         self.model_id = model_id
         self.model_kwargs = model_kwargs or {}
         self.debug_response = debug_response
-        self.top_logprobs = top_logprobs
-        self.logprobs_record = pd.DataFrame()
 
-        # Pre-build OpenAI-compatible client for providers that use it
-        if model_server in ("OpenAI", "xAI", "Mistral", "Baseten"):
-            client_kwargs: dict = {}
-            if model_server == "OpenAI":
-                client_kwargs["api_key"] = self.model_kwargs.get("api_key") or os.getenv("OPENAI_API_KEY")
-            elif model_server == "xAI":
-                client_kwargs["api_key"] = self.model_kwargs.get("api_key") or os.getenv("XAI_API_KEY")
-                client_kwargs["base_url"] = _XAI_BASE_URL
-            elif model_server == "Mistral":
-                client_kwargs["api_key"] = self.model_kwargs.get("api_key") or os.getenv("MISTRAL_API_KEY")
-                client_kwargs["base_url"] = _MISTRAL_BASE_URL
-            elif model_server == "Baseten":
-                client_kwargs["api_key"] = self.model_kwargs.get("api_key") or os.getenv("BASETEN_API_KEY")
-                client_kwargs["base_url"] = _BASETEN_BASE_URL
-            self._openai_client = OpenAI(**client_kwargs)
+        if model_server == "OpenAI":
+            self._openai_client = OpenAI(
+                api_key=self.model_kwargs.get("api_key") or os.getenv("OPENAI_API_KEY")
+            )
 
     # --------------------------------------------------------------------- #
     # Decision
     # --------------------------------------------------------------------- #
 
-    def make_allocation_decision(self, idx: int = 0) -> DecisionResult:
-        """Make a monthly allocation decision via the language model."""
+    def make_allocation_decision(self, idx: int = 0) -> float:
+        """Make a monthly allocation decision via the language model.
+
+        Returns the normalized allocation percent (0–100). The reasoning,
+        justification, and concept-importance rankings are written to
+        ``self.record`` rather than returned.
+        """
         system_content = f"{self.system_message}\n\n{self.instructions}"
 
         decision: AllocationDecision
         reasoning_text: str | None = None
 
-        if self.model_server in ("OpenAI", "xAI", "Mistral", "Baseten"):
+        if self.model_server == "OpenAI":
             decision, reasoning_text = _with_retries(
-                lambda: self._call_openai_compat(system_content),
-                label=self.model_server,
-            )
-        elif self.model_server == "Google":
-            decision, reasoning_text = _with_retries(
-                lambda: _call_google(
-                    self.model_id, system_content, self.observation, self.model_kwargs,
+                lambda: _call_openai(
+                    self._openai_client,
+                    self.model_id,
+                    system_content,
+                    self.observation,
+                    temperature=self.model_kwargs.get("temperature"),
+                    reasoning=self.model_kwargs.get("reasoning"),
                 ),
-                label="Google",
+                label="OpenAI",
             )
         elif self.model_server == "Ollama":
-            decision, thinking, _raw, logprobs_data = _with_retries(
+            decision, reasoning_text = _with_retries(
                 lambda: _call_ollama(
                     self.model_id, system_content, self.observation, self.model_kwargs,
-                    top_logprobs=self.top_logprobs,
                 ),
                 label="Ollama",
             )
-            reasoning_text = thinking
         else:
             raise ValueError(f"Unsupported model server: {self.model_server}")
 
         allocation_percent = self._normalize_allocation_percent(decision.allocation_percent)
         self._record_decision(idx, allocation_percent, decision)
 
-        self.last_reasoning = reasoning_text or "N/A"
-        self.record.loc[idx, "model_reasoning"] = self.last_reasoning
+        self.record.loc[idx, "model_reasoning"] = reasoning_text or "N/A"
 
         if self.debug_response:
             self.record.loc[idx, "response_debug"] = json.dumps(
                 _to_serializable(decision), ensure_ascii=False,
             )
 
-        # Ollama logprobs extraction
-        if self.model_server == "Ollama" and self.top_logprobs is not None and logprobs_data:
-            row = _extract_logprobs_row(logprobs_data, idx)
-            if row is not None:
-                self.logprobs_record = pd.concat(
-                    [self.logprobs_record, pd.DataFrame([row])], ignore_index=True,
-                )
-
-        return DecisionResult(
-            allocation_percent,
-            decision.allocation_reasoning,
-            decision.allocation_concept_importance,
-        )
-
-    def _call_openai_compat(self, system_content: str) -> tuple[AllocationDecision, str | None]:
-        """Call OpenAI-compatible provider."""
-        return _call_openai_compatible(
-            self._openai_client,
-            self.model_id,
-            system_content,
-            self.observation,
-            temperature=self.model_kwargs.get("temperature"),
-            reasoning=self.model_kwargs.get("reasoning"),
-        )
-
-
-# =============================================================================
-# OpenAI Logprobs Operator
-# =============================================================================
-
-_MAX_CHAT_TOP_LOGPROBS = 5  # Chat Completions API ceiling
-
-
-class OpenAIReservoirOperator(BaseReservoirOperator):
-    """OpenAI Chat Completions operator with logprobs extraction support."""
-
-    def __init__(
-        self,
-        model: str,
-        reservoir=None,
-        temperature: float = 1.0,
-        api_key: str | None = None,
-        top_logprobs: int | None = None,
-        include_red_herring: bool = False,
-    ):
-        super().__init__(reservoir, model, include_red_herring=include_red_herring)
-
-        self.model = model
-        self.temperature = temperature
-        self.top_logprobs = top_logprobs
-
-        self.client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
-        self.logprobs_record = pd.DataFrame()
-        self.response: dict | None = None
-
-    # --------------------------------------------------------------------- #
-    # Decision
-    # --------------------------------------------------------------------- #
-
-    def make_allocation_decision(self, idx: int = 0) -> DecisionResult:
-        """Make allocation decision via OpenAI Chat Completions with structured output."""
-        schema = AllocationDecision.model_json_schema()
-        _add_strict_additional_properties(schema)
-
-        messages = [
-            {"role": "system", "content": f"{self.system_message}\n\n{self.instructions}"},
-            {"role": "user", "content": self.observation},
-        ]
-
-        api_params: dict = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": self.temperature,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "allocation_decision",
-                    "strict": True,
-                    "schema": schema,
-                },
-            },
-        }
-
-        if self.top_logprobs is not None:
-            api_params["logprobs"] = True
-            api_params["top_logprobs"] = min(self.top_logprobs, _MAX_CHAT_TOP_LOGPROBS)
-
-        try:
-            completion = self.client.chat.completions.create(**api_params)
-        except Exception as e:
-            err_msg = str(e).lower()
-            if self.top_logprobs is not None and (
-                "logprobs" in err_msg and ("not supported" in err_msg or "not allowed" in err_msg)
-            ):
-                raise SystemExit(
-                    f"\nERROR: logprobs are not supported with model '{self.model}'.\n"
-                    "This model requires a separate run without --include-logprobs to capture reasoning traces.\n"
-                    "Re-run with either:\n"
-                    "  • --include-logprobs (without reasoning) using a non-reasoning or hybrid reasoning model with reasoning set to 'none'\n"
-                    "  • --reasoning-effort high/medium/low (without --include-logprobs) for reasoning traces"
-                ) from e
-            raise
-
-        response_text = completion.choices[0].message.content
-        decision = AllocationDecision(**json.loads(response_text))
-
-        self.response = {"content": decision, "raw_completion": completion}
-
-        if self.top_logprobs is not None:
-            self._extract_logprobs(completion, idx)
-
-        allocation_percent = self._normalize_allocation_percent(decision.allocation_percent)
-        self._record_decision(idx, allocation_percent, decision)
-
-        return DecisionResult(
-            allocation_percent,
-            decision.allocation_reasoning,
-            decision.allocation_concept_importance,
-        )
-
-    # --------------------------------------------------------------------- #
-    # Logprobs extraction
-    # --------------------------------------------------------------------- #
-
-    def _extract_logprobs(self, completion, idx: int):
-        """Extract logprobs for the ``allocation_percent`` numeric token."""
-        for choice in completion.choices:
-            content_logprobs = getattr(getattr(choice, "logprobs", None), "content", None)
-            if not content_logprobs:
-                continue
-            row = _extract_logprobs_row(content_logprobs, idx)
-            if row is not None:
-                self.logprobs_record = pd.concat(
-                    [self.logprobs_record, pd.DataFrame([row])], ignore_index=True,
-                )
+        return allocation_percent
 
 
 # =============================================================================
 # Shared Utilities
 # =============================================================================
-
-def _extract_logprobs_row(
-    token_logprobs: list,
-    idx: int,
-) -> dict | None:
-    """Extract logprobs for the ``allocation_percent`` value token(s).
-
-    Works with both OpenAI and Ollama logprobs data — both expose ``.token``,
-    ``.logprob``, and ``.top_logprobs`` attributes on each token entry.
-
-    Multi-digit numbers may span multiple tokens (common with local Ollama
-    models where ``90`` → ``["9", "0"]``).  When this happens the row
-    includes ``n_value_tokens > 1``, a ``value_tokens`` JSON list, and
-    ``joint_logprob`` / ``joint_prob`` that aggregate across all tokens.
-    The per-candidate columns (``top1_*``, …) reflect the **first**
-    (most-significant-digit) token only — candidate values are the raw
-    single-digit parse since the conditional distribution of subsequent
-    digits is not observed for alternative first digits.
-
-    Returns:
-        A dict suitable for appending to a logprobs DataFrame, or ``None``
-        if the allocation_percent token could not be located.
-    """
-    match = _find_allocation_percent_tokens(token_logprobs)
-    if match is None:
-        return None
-    token_positions, parsed_value = match
-
-    first_info = token_logprobs[token_positions[0]]
-    candidates = _build_candidate_list(first_info)
-
-    # Joint probability across all constituent tokens
-    value_tokens: list[str] = []
-    joint_logprob = 0.0
-    for pos in token_positions:
-        ti = token_logprobs[pos]
-        value_tokens.append(getattr(ti, "token", "") or "")
-        lp = getattr(ti, "logprob", None)
-        if lp is not None:
-            joint_logprob += lp
-
-    row: dict = {
-        "idx": idx,
-        "field_name": "allocation_percent",
-        "parsed_value": parsed_value,
-        "n_value_tokens": len(token_positions),
-        "value_tokens": json.dumps(value_tokens),
-        "joint_logprob": joint_logprob,
-        "joint_prob": _logprob_to_prob(joint_logprob),
-        "token_position": token_positions[0],
-        "token": getattr(first_info, "token", None),
-        "logprob": getattr(first_info, "logprob", None),
-        "prob": _logprob_to_prob(getattr(first_info, "logprob", None)),
-        "top_logprobs": json.dumps([{"token": c["token"], "logprob": c["logprob"]} for c in candidates]),
-        "top_candidates": json.dumps(candidates),
-    }
-
-    for c in candidates:
-        r = c["rank"]
-        row[f"top{r}_token"] = c["token"]
-        row[f"top{r}_value"] = c["value"]
-        row[f"top{r}_logprob"] = c["logprob"]
-        row[f"top{r}_prob"] = c["prob"]
-
-    return row
-
-
-def _find_allocation_percent_tokens(content_logprobs) -> tuple[list[int], float] | None:
-    """Locate all token positions and the numeric value for ``allocation_percent``.
-
-    Returns:
-        ``(token_positions, parsed_value)`` where *token_positions* is a list
-        of indices into *content_logprobs* that span the numeric value, or
-        ``None`` if the field could not be found.
-    """
-    if not content_logprobs:
-        return None
-
-    offsets: list[int] = []
-    cursor = 0
-    text_parts: list[str] = []
-    for token_info in content_logprobs:
-        token_text = (getattr(token_info, "token", None) or "")
-        offsets.append(cursor)
-        cursor += len(token_text)
-        text_parts.append(token_text)
-
-    full_text = "".join(text_parts)
-
-    # Use the LAST match — the logprobs stream may include thinking tokens
-    # where the model discusses allocation_percent before the final JSON.
-    match = None
-    for m in re.finditer(r'"allocation_percent"\s*:\s*([+-]?\d+(?:\.\d+)?)', full_text):
-        match = m
-    if match is None:
-        return None
-
-    value_char_start = match.start(1)
-    value_char_end = match.end(1)
-
-    # Collect every token that overlaps the numeric value span
-    token_positions: list[int] = []
-    for token_idx, start in enumerate(offsets):
-        end = offsets[token_idx + 1] if token_idx + 1 < len(offsets) else cursor
-        if start < value_char_end and end > value_char_start:
-            token_positions.append(token_idx)
-
-    if not token_positions:
-        return None
-
-    return token_positions, float(match.group(1))
-
-
-def _build_candidate_list(token_info) -> list[dict]:
-    """Build ranked candidate list from a token's ``top_logprobs``."""
-    top = getattr(token_info, "top_logprobs", None)
-    if not top:
-        return []
-    candidates = []
-    for rank, t in enumerate(top, start=1):
-        tok = getattr(t, "token", None)
-        num_match = re.search(r"[+-]?\d+(?:\.\d+)?", tok) if tok else None
-        candidates.append({
-            "rank": rank,
-            "token": tok,
-            "value": float(num_match.group(0)) if num_match else None,
-            "logprob": getattr(t, "logprob", None),
-            "prob": _logprob_to_prob(getattr(t, "logprob", None)),
-        })
-    return candidates
-
 
 def _to_serializable(obj):
     """Recursively convert an object to JSON-serializable primitives."""
@@ -1151,13 +670,6 @@ def _to_serializable(obj):
     if hasattr(obj, "__dict__"):
         return _to_serializable(obj.__dict__)
     return str(obj)
-
-
-def _logprob_to_prob(logprob: float | None) -> float | None:
-    """Convert log-probability to probability."""
-    if logprob is None:
-        return None
-    return float(math.exp(logprob))
 
 
 def _add_strict_additional_properties(schema: dict):
@@ -1182,28 +694,9 @@ def build_operator(
     *,
     include_red_herring: bool,
     debug_response: bool,
+    objective: str = "minimize-shortages",
 ):
-    """Build and return the appropriate reservoir operator implementation."""
-    if resolved_model_config.top_logprobs is not None:
-        if resolved_model_config.model_server == "Ollama":
-            return ReservoirAllocationOperator(
-                model_server="Ollama",
-                model_id=resolved_model_config.model,
-                reservoir=reservoir,
-                model_kwargs=resolved_model_config.model_kwargs,
-                include_red_herring=include_red_herring,
-                debug_response=debug_response,
-                top_logprobs=resolved_model_config.top_logprobs,
-            )
-        return OpenAIReservoirOperator(
-            model=resolved_model_config.model,
-            reservoir=reservoir,
-            temperature=resolved_model_config.model_kwargs.get("temperature"),
-            api_key=resolved_model_config.model_kwargs.get("api_key") or os.getenv("OPENAI_API_KEY"),
-            top_logprobs=resolved_model_config.top_logprobs,
-            include_red_herring=include_red_herring,
-        )
-
+    """Build and return the reservoir operator implementation."""
     return ReservoirAllocationOperator(
         model_server=resolved_model_config.model_server,
         model_id=resolved_model_config.model,
@@ -1211,4 +704,5 @@ def build_operator(
         model_kwargs=resolved_model_config.model_kwargs,
         include_red_herring=include_red_herring,
         debug_response=debug_response,
+        objective=objective,
     )

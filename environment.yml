@@ -12,9 +12,6 @@ dependencies:
   - typing-extensions
   - python-dotenv
   - openai
-  - google-genai
-  - mistralai
-  - together
   - matplotlib
   - scikit-learn
   - joblib

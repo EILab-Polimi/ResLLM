@@ -6,13 +6,23 @@ for the historical period (1996-2016).
 """
 
 import os
+import sys
 import json
 import yaml
 import pandas as pd
 import numpy as np
 import argparse
-from textwrap import dedent
-from datetime import datetime
+from types import SimpleNamespace
+
+# Make the resllm package importable so batch tooling reuses the canonical
+# prompt builders (src.prompts lives two dirs up from batch/src).
+_RESLLM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _RESLLM_DIR not in sys.path:
+    sys.path.insert(0, _RESLLM_DIR)
+
+from src.prompts import build_system_message, build_instructions, build_observation
+from schemas import RESPONSE_SCHEMA
+
 
 def main():
     # Parse command line arguments
@@ -23,27 +33,52 @@ def main():
         default=1,
         help="Number of samples to generate for each date (default: 1)"
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="folsom.yml",
+        help="Reservoir config YAML in resllm/configs/ (default: folsom.yml)"
+    )
+    parser.add_argument(
+        "--demand-file",
+        type=str,
+        default="demand.txt",
+        help="Demand file name (in ./data; default: demand.txt)"
+    )
+    parser.add_argument(
+        "--inflow-file",
+        type=str,
+        default="folsom_daily.csv",
+        help="Inflow file name (in ./data; needs storage/outflow columns; default: folsom_daily.csv)"
+    )
+    parser.add_argument(
+        "--wy-forecast-file",
+        type=str,
+        default="FOLC1_wy_hindcast.csv",
+        help="Water year forecast file name (in ./data; default: FOLC1_wy_hindcast.csv)"
+    )
     args = parser.parse_args()
-    
+
     n_samples = args.n_samples
     print(f"Generating {n_samples} sample(s) per date...")
-    
+
     # Setup paths
     file_dir = os.path.dirname(os.path.abspath(__file__))  # resllm/batch/src
     batch_dir = os.path.join(file_dir, "..")  # resllm/batch
     resllm_dir = os.path.join(batch_dir, "..")  # resllm
     repo_root = os.path.join(resllm_dir, "..")  # ResLLM
     data_dir = os.path.join(repo_root, "data")  # ResLLM/data
-    
-    # Load configuration
-    config_path = os.path.join(resllm_dir, "configs", "folsom_hist_forecast.yml")
+
+    # Load configuration (reservoir physics; data files are supplied separately
+    # so a single config — e.g. folsom.yml — works for both sim and batch runs)
+    config_path = os.path.join(resllm_dir, "configs", args.config)
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
-    
+
     # Load data files
-    demand = np.loadtxt(os.path.join(data_dir, config["folsom_reservoir"]["demand_file"]))
-    inflows = pd.read_csv(os.path.join(data_dir, config["folsom_reservoir"]["inflow_file"]))
-    forecasts = pd.read_csv(os.path.join(data_dir, config["folsom_reservoir"]["wy_forecast_file"]))
+    demand = np.loadtxt(os.path.join(data_dir, args.demand_file))
+    inflows = pd.read_csv(os.path.join(data_dir, args.inflow_file))
+    forecasts = pd.read_csv(os.path.join(data_dir, args.wy_forecast_file))
     
     # Process inflow data
     inflows["date"] = pd.to_datetime(inflows["date"])
@@ -88,71 +123,27 @@ def main():
         total_demand -= demand[30 * i : 30 * i + 30].sum()
         remaining_demand_by_month[i + 1] = int(total_demand)
     
-    # System message
-    system_message = dedent(
-        """\
-        You are a water reservoir operator.
-        Your goal is to minimize shortages to downstream water supply by releasing water from the reservoir.
-        The reservoir is located in a region with a Mediterranean climate, characterized by hot, dry summers and highly variable wet winters.
-        The reservoir is operated to meet the municipal and agricultural water supply needs of the region while also maintaining flood control and environmental flow requirements.
-        The water year is defined as the period from October through September.
-        """
+    # Build the system message and instructions from the canonical prompt
+    # builders. The batch ablation experiment uses a reduced prompt: no
+    # importance-ranking instruction and no red herring (and a matching
+    # reduced response schema without concept-importance).
+    reservoir_shim = SimpleNamespace(
+        characteristics={
+            "operable_storage_max": config["folsom_reservoir"]["operable_storage_max"],
+            "operable_storage_min": config["folsom_reservoir"]["operable_storage_min"],
+            "average_water_year_total_demand": int(demand.sum()),
+            "average_cumulative_inflow_by_month": [int(x) for x in cumulative_inflow_by_month],
+            "average_remaining_demand_by_month": [int(x) for x in remaining_demand_by_month],
+            "wy_forecast_file": True,
+        }
     )
-    
-    # Instructions
-    instructions = dedent(
-        """\
-        - You are tasked with determining the percent allocation of water demand to release from the reservoir.
-        - At the beginning of each month, you will be asked to update the percent allocation decision based on your current observations.
-        - In your determination, consider the volume currently in storage, inflow to date compared to expected inflows, and the need to balance meeting current demands against conserving water for future demands.
-        - Note that a shortage is calculated by demand x (100 - percent allocation).
-        You have the following information about the reservoir:
-        - The maximum operable storage level is {} TAF.
-        - The minimum operable storage level is {} TAF.
-        """
-    ).format(
-        config["folsom_reservoir"]["operable_storage_max"],
-        config["folsom_reservoir"]["operable_storage_min"],
+    system_message = build_system_message("minimize-shortages")
+    instructions = build_instructions(
+        reservoir_shim,
+        include_red_herring=False,
+        include_importance_ranking=False,
     )
-    
-    avg_demand = int(demand.sum())
-    instructions += f"- The average total water year demand: {avg_demand}\n"
-    
-    instructions += """- The average cumulative inflow by beginning of month of the water year: """
-    for month in range(12):
-        instructions += f"month {month + 1}: {int(cumulative_inflow_by_month[month])} TAF; "
-    instructions += "\n"
-    
-    instructions += """- The average remaining demand by beginning of month of the water year: """
-    for month in range(12):
-        instructions += f"month {month + 1}: {int(remaining_demand_by_month[month])} TAF; "
-    instructions += "\n"
-    
-    instructions += dedent(
-        """\
-        - Starting in month 4 of the water year, you have access to a probabilistic forecast of inflows for the remainder of the water year.
-        - The probabilistic forecast includes the ensemble mean, and 10th and 90th percentile expected water year inflow.
-        - Use this forecast to inform your allocation decision.
-        """
-    )
-    
-    # Response schema
-    response_schema = {
-        "type": "object",
-        "properties": {
-            "allocation_reasoning": {
-                "type": "string",
-                "description": "A brief justification of the percent allocation decision."
-            },
-            "allocation_percent": {
-                "type": "number",
-                "description": "The percent allocation to release from the reservoir."
-            },
-        },
-        "required": ["allocation_reasoning", "allocation_percent"],
-        "additionalProperties": False
-    }
-    
+
     # Generate batch requests
     batch_requests = []
     request_id = 0
@@ -242,56 +233,21 @@ def main():
         else:
             previous_allocation = inflows.loc[inflows.index[inflows["date"] == date][0] - 1, "allocation_ma30"] * 100.0
         
-        # Construct observation message
-        observation = dedent(
-            f"""\
-            It is the beginning of month {int(mowy)} of the water year.
-            """
+        # Construct observation message via the canonical builder. Passing
+        # the forecast values only when available (mowy > 3) and next-WY demand
+        # only when mowy >= 9 reproduces the historical observation exactly.
+        observation = build_observation(
+            mowy=int(mowy),
+            st_1=st_1,
+            d_wy_rem=d_wy_rem,
+            alloc_1=previous_allocation,
+            qwyaccum=qwyaccum,
+            qwy_forecast_mean=qwy_forecast_mean,
+            qwy_forecast_10=qwy_forecast_10,
+            qwy_forecast_90=qwy_forecast_90,
+            next_wy_demand=int(demand[:90].sum()) if mowy >= 9 else None,
         )
-        
-        if mowy > 1:
-            observation += dedent(
-                f"""\
-                So far this water year, {int(qwyaccum)} TAF of reservoir inflow has been observed.
-                """
-            )
-        
-        observation += dedent(
-            f"""\
-            There is currently {int(st_1)} TAF in storage.
-            """
-        )
-        
-        if qwy_forecast_mean is not None:
-            observation += dedent(
-                f"""\
-                The probabilistic forecasted inflows for the remainder of the water year are:
-                - Mean (expected): {int(qwy_forecast_mean)} TAF
-                - 10th percentile: {int(qwy_forecast_10)} TAF
-                - 90th percentile: {int(qwy_forecast_90)} TAF
-                """
-            )
-        
-        observation += dedent(
-            f"""\
-            There is approximately {int(d_wy_rem)} TAF of water demand to meet over the remainder of the water year.
-            """
-        )
-        
-        if mowy >= 9:
-            observation += dedent(
-                f"""\
-                Also, note that next water year is approaching and the first three months have a demand of {int(demand[:90].sum())} TAF.
-                """
-            )
-        
-        observation += dedent(
-            f"""\
-            The previous percent allocation decision was {int(previous_allocation)} percent.
-            Provide a percent allocation decision (from 0-100 percent) which continues or updates the allocation.
-            """
-        )
-        
+
         # Create n duplicate requests for this date (for sampling variability)
         for sample_num in range(n_samples):
             # Create the batch request
@@ -316,7 +272,7 @@ def main():
                         "json_schema": {
                             "name": "allocation_decision",
                             "strict": True,
-                            "schema": response_schema
+                            "schema": RESPONSE_SCHEMA
                         }
                     },
                     "reasoning_effort":  "high"

@@ -14,14 +14,17 @@ Generate allocation decisions for every monthly decision point from 1996-2016 (2
 
 ### Data Requirements
 
-The script reads directly from `data/` and `resllm/configs/`:
+The script reads directly from `data/` and `resllm/configs/`. The config YAML
+supplies reservoir physics (`operable_storage_max/min`, etc.); the data files
+are passed via CLI flags (defaults match `simulate.py`), so a single config
+such as `folsom.yml` works for both the live simulation and batch runs.
 
-| File | Required Columns | Description |
-|------|------------------|-------------|
-| Config YAML | `demand_file`, `inflow_file`, `wy_forecast_file` | Default: `folsom_hist_forecast.yml` |
-| Inflow CSV | `date`, `inflow`, `storage`, `outflow` | Historical reservoir data |
-| Demand file | (plain text, 365 values) | Daily demand in TAF |
-| Forecast CSV | `date`, `QCYFHM`, `QCYFH1`, `QCYFH9` | Mean, 10th, 90th percentile forecasts |
+| Input | Flag (default) | Required Columns | Description |
+|-------|----------------|------------------|-------------|
+| Config YAML | `--config` (`folsom.yml`) | — | Reservoir physical characteristics |
+| Inflow CSV | `--inflow-file` (`folsom_daily.csv`) | `date`, `inflow`, `storage`, `outflow` | Historical reservoir data |
+| Demand file | `--demand-file` (`demand.txt`) | (plain text, 365 values) | Daily demand in TAF |
+| Forecast CSV | `--wy-forecast-file` (`FOLC1_wy_hindcast.csv`) | `date`, `QCYFHM`, `QCYFH1`, `QCYFH9` | Mean, 10th, 90th percentile forecasts |
 
 The `storage` and `outflow` columns are used to compute initial conditions and previous allocation estimates.
 

@@ -6,7 +6,7 @@ output/
 analysis/
 arnold_et_al_2026/
 *_local*
-*.code-workspace
+*sublime*
 *.vscode
 *.idea
 *.iml
@@ -15,6 +15,7 @@ arnold_et_al_2026/
 *.db
 .claude/
 .github/
+CLAUDE.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

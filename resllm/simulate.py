@@ -45,6 +45,47 @@ def run_single_sample(
     start_wy = args.start_year
     end_wy = args.end_year
     s0 = args.starting_storage
+
+    # Setup output filenames (needed before resume detection)
+    safe_model_name = model.replace(":", "-").replace("/", "_")
+    safe_reasoning_effort = (args.reasoning_effort or "none").strip().lower().replace(" ", "-")
+    output_stem = f"{safe_model_name}_r-{safe_reasoning_effort}"
+    if args.objective != "minimize-shortages":
+        output_stem += f"_obj-{args.objective}"
+    output_dir = os.path.join(file_dir, "output")
+    os.makedirs(output_dir, exist_ok=True)
+    simulation_output_file = os.path.join(
+        output_dir, f"{output_stem}_simulation_output_n{n}.csv"
+    )
+    decision_output_file = os.path.join(
+        output_dir, f"{output_stem}_decision_output_n{n}.csv"
+    )
+
+    # Resume: detect last complete water year from existing output
+    if args.resume and os.path.exists(simulation_output_file):
+        sim_existing = pd.read_csv(simulation_output_file)
+        by_wy = sim_existing.groupby("wy").size()
+        complete_wys = by_wy[by_wy == 365]
+        if not complete_wys.empty:
+            last_complete_wy = int(complete_wys.index[-1])
+            if last_complete_wy < end_wy:
+                resume_s0 = float(sim_existing[sim_existing["wy"] == last_complete_wy]["st"].iloc[-1])
+                resume_start_wy = last_complete_wy + 1
+                # Truncate partial rows from simulation output
+                sim_existing[sim_existing["wy"] <= last_complete_wy].to_csv(
+                    simulation_output_file, index=False
+                )
+                # Truncate partial rows from decision output
+                if os.path.exists(decision_output_file):
+                    dec_existing = pd.read_csv(decision_output_file)
+                    dec_existing[dec_existing["wy"] <= last_complete_wy].to_csv(
+                        decision_output_file, index=False
+                    )
+                start_wy = resume_start_wy
+                s0 = resume_s0
+                with print_lock:
+                    print(f"  [n={n}] Resuming from WY {start_wy} (s0={s0:.2f} TAF)")
+
     ny = end_wy - start_wy + 1
 
     # Each sample gets its own Reservoir and Operator instances
@@ -54,6 +95,7 @@ def run_single_sample(
         R1,
         include_red_herring=args.include_red_herring,
         debug_response=args.debug_response,
+        objective=args.objective,
     )
 
     # simulation dataframes
@@ -63,22 +105,6 @@ def run_single_sample(
     # set the initial allocation decision
     allocation_percent = 100
     t = 0
-
-    # Setup output filenames
-    safe_model_name = model.replace(":", "-").replace("/", "_")
-    safe_reasoning_effort = (args.reasoning_effort or "none").strip().lower().replace(" ", "-")
-    output_stem = f"{safe_model_name}_r-{safe_reasoning_effort}"
-    output_dir = os.path.join(file_dir, "output")
-    os.makedirs(output_dir, exist_ok=True)
-    simulation_output_file = os.path.join(
-        output_dir, f"{output_stem}_simulation_output_n{n}.csv"
-    )
-    decision_output_file = os.path.join(
-        output_dir, f"{output_stem}_decision_output_n{n}.csv"
-    )
-    logprobs_output_file = os.path.join(
-        output_dir, f"{output_stem}_logprobs_output_n{n}.csv"
-    )
 
     prefix = f"[n={n}]"
 
@@ -111,7 +137,7 @@ def run_single_sample(
                 R1_agent.set_observation(
                     idx=t, date=d, wy=wy, mowy=mowy, dowy=ty + 1, alloc_1=allocation_percent, st_1=st_1
                 )
-                allocation_percent, _, _ = R1_agent.make_allocation_decision(idx=t)
+                allocation_percent = R1_agent.make_allocation_decision(idx=t)
 
             # current downstream demand
             dt = R1.demand[ty]
@@ -161,12 +187,6 @@ def run_single_sample(
                         decision_output_file, quotechar='"', index=False, mode='a',
                         header=not os.path.exists(decision_output_file)
                     )
-                logprobs_df = R1_agent.pop_logprobs_record()
-                if not logprobs_df.empty:
-                    logprobs_df.to_csv(
-                        logprobs_output_file, index=False, mode='a',
-                        header=not os.path.exists(logprobs_output_file)
-                    )
 
     with print_lock:
         print(f"  {prefix} Simulation complete")
@@ -193,7 +213,6 @@ def main():
             model=args.model,
             reasoning_effort=args.reasoning_effort,
             temperature=args.temperature,
-            include_logprobs=args.include_logprobs,
         )
     )
     model_server = resolved_model_config.model_server
@@ -208,7 +227,6 @@ def main():
     print("\n" + "─" * 60)
     print(f"  Model Server:  {model_server}")
     print(f"  Model:         {model}")
-    print(f"  Logprobs:      {resolved_model_config.top_logprobs or 'off'}")
     for k, v in safe_model_kwargs.items():
         if k not in ("api_key",):
             print(f"  {k}: {v}")
@@ -248,7 +266,7 @@ def main():
         print(f"\nRunning {nsample} samples in parallel (max_workers={max_workers})")
         futures = {}
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for n in range(nsample):
+            for n in range(args.sample_start, args.sample_start + nsample):
                 future = executor.submit(
                     run_single_sample,
                     n, args, resolved_model_config, model,
@@ -263,7 +281,7 @@ def main():
                     print(f"\n[n={n}] Sample failed with error: {exc}")
                     raise
     else:
-        for n in range(nsample):
+        for n in range(args.sample_start, args.sample_start + nsample):
             run_single_sample(
                 n, args, resolved_model_config, model,
                 R1_characteristics, file_dir, print_lock,
@@ -329,7 +347,7 @@ def parse_args():
         "--model-server",
         required=True,
         default=None,
-        help="Model server to use (e.g., Ollama, OpenAI, xAI, Baseten)."
+        help="Model server to use (Ollama or OpenAI)."
     )
     parser.add_argument(
         "--model",
@@ -342,6 +360,13 @@ def parse_args():
         type=str,
         default="high",
         help="Reasoning effort for supported models: none, minimal, low, medium, high (Default: high).",
+    )
+    parser.add_argument(
+        "--objective",
+        type=str,
+        default="minimize-shortages",
+        choices=["minimize-shortages", "minimize-large-shortages-carryover"],
+        help="Operator objective stated in the system prompt (Default: minimize-shortages).",
     )
     parser.add_argument(
         "--temperature",
@@ -362,10 +387,16 @@ def parse_args():
         help="Capture raw model response payloads for inspection (Default: False).",
     )
     parser.add_argument(
-        "--include-logprobs",
-        default=None,
+        "--resume",
+        default=False,
+        action="store_true",
+        help="Resume from last complete water year in existing output files (Default: False).",
+    )
+    parser.add_argument(
+        "--sample-start",
         type=int,
-        help="Include top N log probabilities in output (OpenAI 0-5, Ollama 0-20, Default: None).",
+        default=0,
+        help="Starting sample index (Default: 0).",
     )
     parser.add_argument(
         "--parallel",
