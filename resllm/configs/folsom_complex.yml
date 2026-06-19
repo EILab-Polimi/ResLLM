@@ -1,0 +1,198 @@
+# config details
+config_name: "folsom_complex"
+
+# reservoir characteristics
+# (folsom_reservoir block copied verbatim from folsom.yml so the simple baseline
+#  still resolves under --no-complexity)
+folsom_reservoir:
+  operable_storage_max: 975 # taf
+  operable_storage_min: 90 # taf
+  max_safe_release: 130000 # cfs
+  # storage volume to elevation relationship (TAF to ft)
+  sp_to_ep: [[0, 48, 93, 142, 192, 240, 288, 386, 678, 977],
+             [210, 305, 332, 351, 365, 376, 385, 401, 437, 466]]
+  # day of water year to top of conservation storage (TAF). Deep-winter floor (dowy 50=Nov19
+  # to dowy 151=Feb28) = 575 TAF = the NORMAL Folsom flood target (reserve 400 TAF of ~975 pool),
+  # per the 2017 WCM Update Selected Plan (Alt 2). Mar refill rises toward full pool. The dynamic
+  # curve draws this floor DOWN toward the 600-TAF max reservation via
+  # dynamic_tocs.max_winter_encroachment_taf.
+  tp_to_tocs: [[0, 50, 151, 200, 243, 366],
+               [975, 575, 575, 750, 975, 975]]
+  # storage to release relationship (TAF to cfs), from the Folsom Dam flood control rule curves:
+  # http://www.usbr.gov/mp/cvp//cvp-cas/docs/Draft_Findings/130814_tech_memo_flood_control_purpose_hydrology_methods_results.pdf
+  sp_to_rp: [[90, 100, 400, 600, 975],
+             [0, 35000, 40000, 115000, 130000]]
+
+# -----------------------------------------------------------------------------
+# Complexity-mode operating context, grounded in CalSim-3 CVP/American/Folsom operations
+# (FMStandard.wresl, WS_Contracts.wresl, FolsomRuleCurve_SAC.wresl, Other/Wytypes/*).
+# Toggle with `enabled` or the --complexity / --no-complexity CLI override. ResLLM Folsom
+# is at real Folsom scale (K=975 TAF, ~730 TAF/yr demand), so source cfs/TAF values port
+# directly. cfs→TAF/day: 1 cfs ≈ 0.0019835 TAF/day (utils.cfs_to_taf). Config text may use
+# real CalSim names; only prompt-facing text is generic.
+# -----------------------------------------------------------------------------
+complexity:
+  enabled: true
+  hydrologic_classes: [dry, normal, wet]
+
+  # Full-WY inflow index (cumulative observed + remaining-WY forecast, TAF) thresholds.
+  # These produce ONLY the dry/normal/wet label shown to the agent; the physics responds
+  # to the continuous American River Index (ARI). ~Terciles of projected full-WY Folsom
+  # inflow over WY1996–2016 (mean ≈ 2608, 33rd pct ≈ 1769, 67th ≈ 2871 TAF).
+  wy_index_thresholds:
+    dry_max: 1800   # index <= dry_max  -> "dry" label
+    wet_min: 2900   # index >= wet_min  -> "wet" label ; otherwise "normal"
+
+  # American River Index = wy_inflow_index − cumulative spills (releases above
+  # spill_threshold_cfs since Oct), per FMStandard.wresl ARI = max(Amer_B120 − Fol_spill_vol, 0).
+  spill_threshold_cfs: 8000
+
+  # Minimum-flow LLM decision. The required min instream flow (FMS Minimum Flows Requirement)
+  # splits into a FIRM floor (floor_frac of required, always force-released) and a discretionary
+  # portion above it. The agent's `meet_min_flow` boolean delivers the full flow (true) or
+  # curtails to the floor (false); curtailing is framed as a regulatory violation for extreme
+  # low storage. floor_frac=0.1 lets the agent cut up to ~90%, near the deepest historical cut
+  # (~0.95 on the worst day, data/historical_shortage_backcalc.csv); a policy/sensitivity knob.
+  min_flow_decision:
+    floor_frac: 0.1
+
+  # ---------------------------------------------------------------------------------------
+  # FMS minimum-flow standard (Lower American River Flow Management Standard, ARWA-103, 2006).
+  # The regulatory min instream flow is computed DIRECTLY here (complex mode requires this block).
+  # The FMS keys the Minimum Flows Requirement (MFR, cfs at Nimbus) on a DIFFERENT signal each
+  # season — storage in fall/winter, inflow in spring/summer — so a single inflow index would
+  # over-state the dry-winter minimum (above what a depleted Folsom released in 2008/09 + 2014–16):
+  #   * Oct–Dec: Four Reservoir Index (FRI = end-of-Sep storage in French Meadows, Union Valley,
+  #     Hell Hole, Folsom), via Folsom-only proxy FRI = fri_from_folsom[0]*S_Folsom_oct1 + [1]
+  #     (CalSim DCR2023 regression, r=0.98).
+  #   * Jan–Feb: Sacramento River Index (SRI, 75% exceedance) tiers + end-of-month Folsom storage
+  #     triggers (300/350 TAF). Historical SRI read from sri_file (CalSim SACRIVERINDEX_75EXC_DV
+  #     via data/extract_sacramento_river_index.py); the Folsom proxy (sri_from_folsom_idx, r=0.62)
+  #     is a fallback when the file/year is absent.
+  #   * Mar–Sep: Impaired Folsom Inflow Index (IFII = forecast May–Sep Folsom inflow), via proxy
+  #     IFII = ifii_from_folsom_idx[0]*wy_index + [1] (CalSim r=0.82).
+  #   * Year-round off-ramp (FMS §2.7): very low Folsom storage (<200 TAF) relaxes the floor toward
+  #     250 cfs (500 in fall).
+  # Folsom storage is current observable state ⇒ no future-information leak. The MFR chains
+  # month-to-month (Jan from Dec, …), holds the FRI from Oct 1, and refreshes monthly
+  # (Reservoir.update_monthly_min_flow). cfs are converted to TAF/day.
+  fms:
+    enabled: true
+    sri_file: sacramento_river_index.csv
+    # Oct–Dec FRI curve (Fig 3): FRI(TAF) -> cfs; FRI below the first breakpoint -> below_min.
+    fri_from_folsom: [1.259, 233.1]
+    fri_curve: [[300, 600, 848], [800, 800, 2000]]
+    fri_below_min_cfs: 500
+    oct_cap_cfs: 1500                # Oct 1–Nov 1 cap (spawning flow progression)
+    # Jan–Feb SRI tiers (Table 1): critical < 10.2 MAF, above-normal/wet >= 15.7 MAF.
+    sri_critical_taf: 10200
+    sri_wet_taf: 15700
+    sri_from_folsom_idx: [1185, 4112]   # fallback only (Folsom annual idx at 10.2 / 15.7 MAF)
+    janfeb_max_cfs: 1750
+    critical_cut_frac: 0.85
+    critical_floor_cfs: 800
+    critical_offramp_cfs: 250        # critical SRI year AND prev-month MFR <= 800
+    eod_dec_storage_taf: 300         # end-of-Dec storage trigger -> Jan = max(0.85*Dec, 800)
+    eod_jan_storage_taf: 350         # end-of-Jan storage trigger -> Feb = max(0.85*Jan, 800)
+    storage_trigger_frac: 0.85
+    storage_trigger_floor_cfs: 800
+    # Mar–Sep IFII curve (Fig 4): IFII(TAF) -> cfs; IFII below the first breakpoint -> below_min.
+    ifii_from_folsom_idx: [0.311, 186.3]
+    ifii_curve: [[250, 375, 550], [800, 800, 1750]]
+    ifii_below_min_cfs: 250
+    sep_cap_cfs: 1500                # post-Labor-Day cap
+    # Year-round off-ramp (FMS §2.7): storage below this -> minimum may drop to these floors.
+    offramp_storage_taf: 200
+    offramp_cfs_jansep: 250
+    offramp_cfs_octdec: 500
+
+  # Forecast-based flood curve (forced; flood_space = K - tocs), calibrated to the 2017 WCM
+  # Update Selected Plan (Alt 2, Forecast-Informed Operations): variable flood space 400-600 TAF
+  # => TOCS 575 (reserve 400, NORMAL) <-> 375 (reserve 600, wet extreme). Forecast-based flood
+  # space applies ONLY in the WCM winter window (Nov 19-Feb 28), so flood_season_mowy = [2,5]:
+  #   Winter (mowy 2-5): hold the 575-TAF baseline, drawn DOWN toward the 375-TAF max-reservation
+  #     as the near-term outlook scales lo->hi (max_winter_encroachment_taf = 200, a monthly proxy
+  #     for the WCM's event-driven 300-TAF/5-day forecast drawdown).
+  #   Fall/spring (rest of year): TOCS = static tp_to_tocs curve (the WCM applies no forecast-based
+  #     flood space outside the winter window).
+  # winter_nearterm lo/hi = 400/1550 ≈ 10th/90th pct of the winter near-term forecast (398/1558 TAF).
+  dynamic_tocs:
+    flood_season_mowy: [2, 5]
+    max_winter_encroachment_taf: 200
+    winter_nearterm_lo: 400
+    winter_nearterm_hi: 1550
+    # aggressive_floor_curve: optional [[dowy...], [tocs...]] lower bound (omitted)
+
+  # Carryover storage target: fully LLM-governed, not configured here. When the agent commits a
+  # carryover_target_taf >= 0, the release-cap defense rations drawdown to hold storage at or above
+  # it through the operating window (end-of-May peak Feb–May, else end of water year), never cutting
+  # the minimum flow or senior deliveries; -1 means no target and no enforcement.
+
+  # ---------------------------------------------------------------------------------------
+  # Demand stack — built from the CalSim-3 channel decomposition + diversion arcs, NOT from
+  # demand.txt (which drives only the non-complex baseline). All layers are ADDITIVE and served
+  # by the single release rt (= observed total storage outflow); mass balance is S = S + Q − rt,
+  # no separate off-channel withdrawal. monthly_taf arrays are Oct→Sep (mowy 1..12), from
+  # data/calsim_folsom_decomposition.csv (built by data/extract_calsim_folsom.py).
+  # ---------------------------------------------------------------------------------------
+
+  # Supplemental downstream-flow demand — CalSim FLOW-ADD-INSTREAM (C_NTOMA_ADD1), instream flow
+  # above the minimum that supports downstream/Delta management. A genuine DEMAND the LLM's
+  # allocation_percent governs: under-delivery is a downstream shortage, the remainder conserved
+  # as carryover. Winter flood spill (FLOW-SPILL-POWER) is excluded (rule-curve physics, not demand).
+  #
+  # Per water-year month (mowy 1=Oct … 12=Sep): [[index breakpoints (TAF)], [supplemental (TAF/mo)]],
+  # linearly interpolated (np.interp clamps the flat tails). The 7 breakpoints are the centroids of
+  # equal-count quantile bins of the annual FOLSOMINFLOWEST_DV index; each value is that bin's mean
+  # realized C_NTOMA_ADD1. Built by data/extract_calsim_folsom.py --supp-bins 7
+  # (data/calsim_supplemental_schedule.csv). Annual scale by bin: ~293/396/669/1014/1310/1679/1891 TAF/yr.
+  # IMPORTANT: indexed at RUNTIME on annual water-year hydrology (wy_index), NOT the spill-decremented
+  # running ARI used for the minimum flow — Delta demand is set by water-year type and must not relax
+  # just because Folsom spilled over winter/spring (see operator.py / simulate.py / backcalc).
+  supplemental_schedule:
+    - [[950, 1384, 1825, 2343, 2983, 3893, 5156], [32.31, 41.1, 7.18, 9.78, 24.73, 36.56, 23.1]]      #  1 Oct
+    - [[950, 1384, 1825, 2343, 2983, 3893, 5156], [49.62, 52.49, 68.16, 39.57, 50.77, 89.71, 83.97]]   #  2 Nov
+    - [[950, 1384, 1825, 2343, 2983, 3893, 5156], [13.72, 6.63, 54.13, 21.33, 71.36, 92.8, 179.86]]    #  3 Dec
+    - [[950, 1384, 1825, 2343, 2983, 3893, 5156], [7.94, 16.7, 18.87, 42.18, 176.68, 184.64, 236.0]]   #  4 Jan
+    - [[950, 1384, 1825, 2343, 2983, 3893, 5156], [5.37, 17.43, 65.47, 95.06, 153.93, 185.35, 203.57]] #  5 Feb
+    - [[950, 1384, 1825, 2343, 2983, 3893, 5156], [0.42, 0.0, 14.61, 67.97, 89.5, 138.6, 165.71]]      #  6 Mar
+    - [[950, 1384, 1825, 2343, 2983, 3893, 5156], [0.0, 0.36, 32.38, 53.42, 76.17, 173.85, 194.32]]    #  7 Apr
+    - [[950, 1384, 1825, 2343, 2983, 3893, 5156], [12.85, 10.52, 55.98, 188.51, 190.05, 237.79, 235.73]] #  8 May
+    - [[950, 1384, 1825, 2343, 2983, 3893, 5156], [45.88, 75.06, 139.12, 186.41, 197.74, 204.48, 216.7]]  #  9 Jun
+    - [[950, 1384, 1825, 2343, 2983, 3893, 5156], [64.58, 122.65, 152.84, 174.14, 148.96, 153.55, 158.0]] # 10 Jul
+    - [[950, 1384, 1825, 2343, 2983, 3893, 5156], [54.94, 41.17, 55.25, 96.11, 93.65, 126.78, 142.24]]  # 11 Aug
+    - [[950, 1384, 1825, 2343, 2983, 3893, 5156], [5.74, 12.26, 4.89, 39.66, 36.41, 54.74, 51.37]]      # 12 Sep
+
+  # Delta-support floor (TAF/month, mowy 1=Oct … 12=Sep): a per-month MINIMUM supplemental demand.
+  # Encodes the persistent Aug–Sep downstream/Delta obligation the driest years still required
+  # (~30 TAF/yr above the interpolated demand, uncorrelated with storage/wetness). Binds only when
+  # the interpolated demand falls below it (driest years); 0 elsewhere = no effect.
+  supplemental_floor_monthly_taf: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 68, 22]
+
+  # Low-storage relaxation of the supplemental (Delta) demand. In the listed months (Nov-May, mowy
+  # 2-8), the supplemental demand scales LINEARLY with Folsom storage — full at/above full_above_taf,
+  # zero at/below zero_below_taf. Historically only ~49% of the modeled supplemental was delivered
+  # below 450 TAF in Nov-May (vs 91% above); zero_below_taf is set to the FMS min-flow off-ramp
+  # (200 TAF). Summer (Jun-Oct) and the Aug/Sep floors are unaffected. Remove the block for
+  # storage-independent demand.
+  supplemental_low_storage:
+    months_mowy: [2, 3, 4, 5, 6, 7, 8]   # Nov, Dec, Jan, Feb, Mar, Apr, May
+    full_above_taf: 450
+    zero_below_taf: 200
+
+  # Committed upstream M&I (CalSim D_FOLSM* + D_NTOMA_FSC003), released from storage as part of rt
+  # (Σ≈155 TAF/yr). senior_frac = firm water-rights (Σ_WR arcs, always met) share of the total
+  # (~0.32/mo); the junior CVP/MFP remainder (wf_cvp_frac) is the LLM's choice (junior_delivery_percent).
+  upstream_mi:
+    monthly_taf: [13.94, 9.54, 8.35, 8.00, 7.24, 8.21, 9.88, 13.99, 17.17, 20.99, 20.33, 17.30]
+    senior_frac: 0.32
+    wf_cvp_frac: 0.68
+    # Hydrology-suggested junior delivery fraction shown to the agent (soft reference, NOT enforced —
+    # the agent sets junior_delivery_percent): full in wet years, down toward 0.6 in dry. [[wy_inflow_index
+    # breakpoints (TAF)], [factor]], tied to the dry/wet thresholds (1800/2900), per WS_Contracts.wresl UIFR cutbacks.
+    water_forum_cutback: [[1800, 2900], [0.6, 1.0]]
+
+  # Lower-American M&I (CalSim D_AMR007 Fairbairn + D_AMR017 Carmichael, Σ≈91 TAF/yr) — diverted
+  # below the dam from the released flow, NOT from Folsom storage. Informational only: not a separate
+  # storage draw and not added to the release demand.
+  lower_mi_monthly_taf: [7.36, 6.18, 5.32, 5.15, 4.54, 5.44, 6.32, 8.25, 10.04, 11.63, 11.17, 9.13]
