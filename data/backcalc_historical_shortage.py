@@ -21,9 +21,14 @@ Method (mirrors ``simulate.py`` / ``reservoir.py``):
   - The minimum instream flow is ``Reservoir.compute_min_flow`` — the Lower American River
     Flow Management Standard Minimum Flows Requirement, refreshed once per month with
     ``Reservoir.update_monthly_min_flow`` and held across the month.
-  - The observed release is attributed across the priority stack
-    (MIF -> senior M&I -> junior M&I -> supplemental); each layer's shortfall is
-    ``max(0, demand - served)``. The remainder above the full stack is split into supplemental vs
+  - The observed release is attributed across the priority stack, FIRM layers first:
+    (MIF regulatory floor -> senior M&I -> discretionary MIF remainder -> junior M&I ->
+    supplemental); each layer's shortfall is ``max(0, demand - served)``. Senior committed
+    M&I is firm in the forward model (protected by ``firm_floor``; the LLM never books a senior
+    shortfall), so it is served ahead of the DISCRETIONARY minimum-flow remainder — only the MIF
+    regulatory floor (``min_flow_decision.floor_frac`` of the requirement) outranks it. This keeps
+    senior firm for the historical baseline too; the total release attributed is unchanged, only
+    the min-flow vs senior split differs. The remainder above the full stack is split into supplemental vs
     flood spill (matching analysis/complex_helper._add_derived, historical branch): surplus is
     FLOOD SPILL only inside the flood season — Nov 1 (dowy 32) through June 15 (dowy 258) — AND
     within 100 TAF of / above the operating flood curve (``tocs_day``). Everything else is
@@ -130,6 +135,9 @@ def backcalc(R: Reservoir, hist: pd.DataFrame, dyn_tocs: dict[str, float] | None
     spill_threshold_taf = utils.cfs_to_taf(R.complexity.get("spill_threshold_cfs", 8000))
     senior_frac = R._upstream_mi_senior_frac
     cvp_frac = R._upstream_mi_wf_cvp_frac
+    # Firm MIF floor fraction (matches simulate.py): the floor outranks senior M&I; the
+    # discretionary MIF remainder ranks below it.
+    min_flow_floor_frac = float(R.complexity.get("min_flow_decision", {}).get("floor_frac", 0.5))
     demand = R.demand  # demand.txt (365 daily TAF) — recorded for reference only
     dyn_tocs = dyn_tocs or {}
 
@@ -175,12 +183,18 @@ def backcalc(R: Reservoir, hist: pd.DataFrame, dyn_tocs: dict[str, float] | None
             # Storage (start-of-day) applies the Nov-May low-storage relaxation, matching the sim.
             delta_demand = R.delta_demand_day(mowy, wy_index, st=float(row["prev_storage"]))
 
-            # Attribute the observed release across the priority stack.
+            # Attribute the observed release across the priority stack, FIRM layers first:
+            # MIF regulatory floor -> senior M&I -> discretionary MIF remainder -> junior -> delta.
+            # Senior is firm (served before the discretionary MIF), matching the forward model's
+            # firm_floor; only the realized split between min_flow_short and senior_short changes.
+            mif_floor = instream * min_flow_floor_frac
             served = outflow
-            mif_served = min(served, instream);        served -= mif_served
-            senior_served = min(served, senior);       served -= senior_served
-            junior_served = min(served, junior_full);  served -= junior_served
-            delta_served = min(served, delta_demand);  served -= delta_served
+            floor_served = min(served, mif_floor);              served -= floor_served
+            senior_served = min(served, senior);                served -= senior_served
+            disc_served = min(served, instream - mif_floor);    served -= disc_served
+            mif_served = floor_served + disc_served
+            junior_served = min(served, junior_full);           served -= junior_served
+            delta_served = min(served, delta_demand);           served -= delta_served
             surplus = served            # observed release above the full demand stack
 
             # Surplus split for the observed record (identical to analysis/complex_helper.
