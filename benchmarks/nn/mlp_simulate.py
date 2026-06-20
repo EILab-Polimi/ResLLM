@@ -28,20 +28,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'resllm')
 from src.reservoir import Reservoir
 import src.utils as utils
 
-def load_model():
-    """Load the trained model, scalers, and metadata."""
+def load_model(model_dir='./output'):
+    """Load the trained model, scalers, and metadata from ``model_dir``."""
     # Load model
-    mlp = joblib.load('./output/mlp_allocation_model.pkl')
-    
+    mlp = joblib.load(os.path.join(model_dir, 'mlp_allocation_model.pkl'))
+
     # Load scalers
-    scalers = joblib.load('./output/mlp_allocation_scalers.pkl')
+    scalers = joblib.load(os.path.join(model_dir, 'mlp_allocation_scalers.pkl'))
     scaler_X = scalers['scaler_X']
     scaler_y = scalers['scaler_y']
-    
+
     # Load metadata
-    with open('./output/mlp_allocation_metadata.json', 'r') as f:
+    with open(os.path.join(model_dir, 'mlp_allocation_metadata.json'), 'r') as f:
         metadata = json.load(f)
-    
+
     return mlp, scaler_X, scaler_y, metadata
 
 def prepare_features(storage, water_year_month, allocation_prev, inflow_ma):
@@ -117,36 +117,48 @@ def predict_allocation(mlp, scaler_X, scaler_y, X):
     return y_pred
 
 
-def run_simulation(start_year=1996, end_year=2016, starting_storage=466.1, config_name="folsom_hist", fix_tocs=False):
+def run_simulation(start_year=1996, end_year=2016, starting_storage=466.1,
+                   config_name="folsom_complex", tocs="dynamic_hist_cap",
+                   inflow_file="folsom_daily.csv", demand_file="demand.txt",
+                   monthly_forecast_file="FOLC1_monthly_forecast.csv",
+                   model_dir="./output"):
     """
     Run reservoir simulation using MLP model for allocation decisions.
-    
+
     Parameters:
     -----------
-    start_year : int
-        Starting water year
-    end_year : int
-        Ending water year
+    start_year, end_year : int
+        Water-year range to simulate.
     starting_storage : float
-        Initial storage in TAF
+        Initial storage in TAF.
     config_name : str
-        Name of the configuration file (without .yml extension)
-        Options: 'folsom_hist' or 'folsom_paleo'
-    
+        Reservoir-config name (without .yml); supplies the physical reservoir parameters
+        (storage curve, rule curve, release curve). Files and TOCS mode come from the
+        arguments below, not the config (the configs no longer carry those keys).
+    tocs : str
+        TOCS mode: ``fixed`` | ``historical`` | ``dynamic`` | ``dynamic_hist_cap``. The dynamic
+        modes load the ``complexity.dynamic_tocs`` block and the monthly forecast so the MLP
+        faces the same forecast-conditioned flood curve as the complex run (the MLP keeps its
+        own simple demand model -- only the flood limit changes).
+    inflow_file, demand_file, monthly_forecast_file : str
+        Input file names under ``../../data``. ``inflow_file`` must carry a ``storage`` column
+        for the ``dynamic_hist_cap`` historical relaxation. ``monthly_forecast_file`` (``nt3_mean``)
+        is read only for the dynamic modes.
+    model_dir : str
+        Directory holding the MLP ``.pkl`` / ``.json`` artifacts.
+
     Returns:
     --------
-    simulation_df : pd.DataFrame
-        Daily simulation results
-    decision_df : pd.DataFrame
-        Monthly allocation decisions
+    simulation_df, decision_df : pd.DataFrame
+        Daily simulation results and monthly allocation decisions.
     """
     print("="*60)
     print("MLP-Based Reservoir Simulation")
     print("="*60)
-    
+
     # Load MLP model
     print("\nLoading MLP model...")
-    mlp, scaler_X, scaler_y, metadata = load_model()
+    mlp, scaler_X, scaler_y, metadata = load_model(model_dir)
     print(f"✓ Model loaded (Test R²: {metadata['performance']['test_r2']:.4f})")
     
     # Load reservoir configuration
@@ -155,21 +167,31 @@ def run_simulation(start_year=1996, end_year=2016, starting_storage=466.1, confi
         config = yaml.safe_load(f)
     print(f"✓ Configuration loaded: {config['config_name']}")
     
-    # Setup reservoir
+    # Setup reservoir. Physical parameters come from the config; files and TOCS mode come from
+    # the arguments (the configs are no longer file-bearing -- resllm/simulate.py drives those via
+    # CLI too).
     data_dir = "../../data"
+    res = config["folsom_reservoir"]
     R1_characteristics = {
-        "tocs": 'fixed' if fix_tocs else config["folsom_reservoir"]["tocs"],
-        "demand_file": os.path.join(data_dir, config["folsom_reservoir"]["demand_file"]),
-        "inflow_file": os.path.join(data_dir, config["folsom_reservoir"]["inflow_file"]),
+        "tocs": tocs,
+        "demand_file": os.path.join(data_dir, demand_file),
+        "inflow_file": os.path.join(data_dir, inflow_file),
         "wy_forecast_file": False,
-        "operable_storage_max": config["folsom_reservoir"]["operable_storage_max"],
-        "operable_storage_min": config["folsom_reservoir"]["operable_storage_min"],
-        "max_safe_release": utils.cfs_to_taf(config["folsom_reservoir"]["max_safe_release"]),
-        "sp_to_ep": config["folsom_reservoir"]["sp_to_ep"],
-        "tp_to_tocs": config["folsom_reservoir"]["tp_to_tocs"],
-        "sp_to_rp": config["folsom_reservoir"]["sp_to_rp"],
+        "operable_storage_max": res["operable_storage_max"],
+        "operable_storage_min": res["operable_storage_min"],
+        "max_safe_release": utils.cfs_to_taf(res["max_safe_release"]),
+        "sp_to_ep": res["sp_to_ep"],
+        "tp_to_tocs": res["tp_to_tocs"],
+        "sp_to_rp": res["sp_to_rp"],
     }
-    
+    # Dynamic flood curve: give the reservoir the dynamic_tocs parameters and the near-term forecast
+    # WITHOUT enabling complexity_mode, so the demand stack stays simple but the flood limit follows
+    # the same forecast-conditioned curve as the complex run.
+    dynamic = tocs in ("dynamic", "dynamic_hist_cap")
+    if dynamic:
+        R1_characteristics["complexity"] = {"dynamic_tocs": config["complexity"]["dynamic_tocs"]}
+        R1_characteristics["wy_monthly_forecast_file"] = os.path.join(data_dir, monthly_forecast_file)
+
     R1 = Reservoir(characteristics=R1_characteristics)
     print("✓ Reservoir initialized")
     
@@ -200,6 +222,7 @@ def run_simulation(start_year=1996, end_year=2016, starting_storage=466.1, confi
     # Initialize
     allocation_percent = 100.0
     allocation_prev = 1.0
+    near_term = None   # near-term inflow outlook, set monthly and held for the dynamic flood curve
     t = 0
     
     print(f"\nSimulating water years {start_year} to {end_year}...")
@@ -259,7 +282,13 @@ def run_simulation(start_year=1996, end_year=2016, starting_storage=466.1, confi
                     'allocation_decision': allocation_predicted,
                     'allocation_percent': allocation_percent
                 })
-            
+
+                # Hold the near-term outlook for the whole month: the dynamic flood curve uses the
+                # month-start value, mirroring the complex run's monthly decision (the forecast file
+                # is daily, so reading it every day would otherwise drift the curve within a month).
+                if dynamic:
+                    near_term = R1.near_term_inflow(d.strftime("%Y-%m-%d"))
+
             # Current downstream demand
             dt = R1.demand[ty]
             # Set target demand from allocation decision
@@ -273,9 +302,11 @@ def run_simulation(start_year=1996, end_year=2016, starting_storage=466.1, confi
                 "inflow",
             ].values[0]
             
-            # TOCS and evaluate
-            tocs = R1.compute_tocs(dowy=ty + 1, date=d.strftime("%Y-%m-%d"))
-            rt, st = R1.evaluate(st_1=st_1, qt=qt, uu=uu, tocs=tocs)
+            # TOCS and evaluate. The dynamic flood curve uses the month-held near-term inflow
+            # outlook (a proxy for upstream-reservoir storage availability); static modes ignore it.
+            date_str = d.strftime("%Y-%m-%d")
+            tocs_day = R1.compute_tocs(dowy=ty + 1, date=date_str, near_term=near_term)
+            rt, st = R1.evaluate(st_1=st_1, qt=qt, uu=uu, tocs=tocs_day)
             
             # Record timestep
             R1.record_timestep(
@@ -323,9 +354,22 @@ Note: Paleo data covers water years 1900-1999 (starts Oct 1, 1899)
       Historical data covers water years 1905-2016 (starts Oct 1, 1904)
         """)
     
-    parser.add_argument('--config', type=str, default='folsom_hist',
-                        choices=['folsom_hist', 'folsom_paleo'],
-                        help='Configuration to use (default: folsom_hist)')
+    parser.add_argument('--config', type=str, default='folsom_complex',
+                        choices=['folsom_complex', 'folsom', 'folsom_paleo'],
+                        help='Reservoir config supplying physical parameters (default: folsom_complex)')
+    parser.add_argument('--tocs', type=str, default='dynamic_hist_cap',
+                        choices=['fixed', 'historical', 'dynamic', 'dynamic_hist_cap'],
+                        help='TOCS / flood-curve mode (default: dynamic_hist_cap)')
+    parser.add_argument('--inflow-file', type=str, default='folsom_daily.csv',
+                        help='Inflow file in ../../data (must have a storage column for dynamic_hist_cap)')
+    parser.add_argument('--demand-file', type=str, default='demand.txt',
+                        help='Demand file in ../../data (default: demand.txt)')
+    parser.add_argument('--wy-monthly-forecast-file', type=str, default='FOLC1_monthly_forecast.csv',
+                        help='Monthly near-term forecast (nt3_mean) for the dynamic curve')
+    parser.add_argument('--model-dir', type=str, default='./output',
+                        help='Directory with the MLP .pkl/.json artifacts (default: ./output)')
+    parser.add_argument('--output-dir', type=str, default='./output',
+                        help='Directory to write simulation/decision CSVs (default: ./output)')
     parser.add_argument('--start-year', type=int, default=1996,
                         help='Starting water year (default: 1996)')
     parser.add_argument('--end-year', type=int, default=2016,
@@ -333,17 +377,22 @@ Note: Paleo data covers water years 1900-1999 (starts Oct 1, 1899)
     parser.add_argument('--starting-storage', type=float, default=466.1,
                         help='Initial storage in TAF (default: 466.1)')
     parser.add_argument('--fix-tocs', action='store_true', default=False,
-                        help='Fix TOCS to static 365 dowy (default: False)')
-    
+                        help='Override --tocs to "fixed" (back-compat; default: False)')
+
     args = parser.parse_args()
-    
+    tocs_mode = 'fixed' if args.fix_tocs else args.tocs
+
     # Run simulation
     simulation_df, decision_df = run_simulation(
         start_year=args.start_year,
         end_year=args.end_year,
         starting_storage=args.starting_storage,
-        fix_tocs=args.fix_tocs,
-        config_name=args.config
+        config_name=args.config,
+        tocs=tocs_mode,
+        inflow_file=args.inflow_file,
+        demand_file=args.demand_file,
+        monthly_forecast_file=args.wy_monthly_forecast_file,
+        model_dir=args.model_dir,
     )
     
     # Save outputs
@@ -353,12 +402,11 @@ Note: Paleo data covers water years 1900-1999 (starts Oct 1, 1899)
     
     start_year = args.start_year
     end_year = args.end_year
-    config_suffix = args.config.replace('folsom_', '')
-    
-    tocs_suffix = 'fixtocs_' if args.fix_tocs else ''
+    period = 'paleo' if 'paleo' in args.config else 'hist'
+    tocs_tag = tocs_mode.replace('_', '')
 
-    simulation_file = f'./output/mlp_simulation_output_{config_suffix}_{tocs_suffix}{start_year}_{end_year}.csv'
-    decision_file = f'./output/mlp_decision_output_{config_suffix}_{tocs_suffix}{start_year}_{end_year}.csv'
+    simulation_file = f'{args.output_dir}/mlp_simulation_output_{period}_{tocs_tag}_{start_year}_{end_year}.csv'
+    decision_file = f'{args.output_dir}/mlp_decision_output_{period}_{tocs_tag}_{start_year}_{end_year}.csv'
 
     simulation_df.to_csv(simulation_file, index=False)
     print(f"✓ Simulation output saved to: {simulation_file}")
