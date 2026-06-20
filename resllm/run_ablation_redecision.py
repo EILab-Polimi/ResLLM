@@ -32,12 +32,15 @@ Output goes to ``output/ablation/`` (a dedicated subdirectory — never a live r
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from glob import glob
 
+import numpy as np
 import pandas as pd
 
 # Make ``from src...`` importable regardless of the caller's working directory.
@@ -120,6 +123,80 @@ def load_observations(
 
 
 # =============================================================================
+# Resumable checkpointing
+# =============================================================================
+
+def _make_custom_id(ablation_type: str, sample_num: int, date) -> str:
+    """Stable per-(row, ablation) key used to dedup and resume."""
+    return f"abl_{ablation_type}_n{sample_num}_date{str(date).replace('-', '')}"
+
+
+def _json_default(o):
+    """JSON encoder fallback: coerce numpy scalars to native types so they round-trip."""
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, np.floating):
+        return float(o)
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    return str(o)
+
+
+def _load_checkpoint(path: str) -> dict[str, dict]:
+    """Read a ``.partial.jsonl`` checkpoint into ``{custom_id: result}`` for COMPLETED-OK rows.
+
+    A ``custom_id`` counts as done only if it has at least one error-free entry; errored
+    entries are ignored here so they are retried on resume. Tolerates a truncated final line
+    from a hard crash (line-buffered append means at most the last line can be partial).
+    """
+    done_ok: dict[str, dict] = {}
+    if not os.path.exists(path):
+        return done_ok
+    with open(path, "r") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # half-written trailing line from an interrupted run
+            cid = rec.get("custom_id")
+            if cid and not rec.get("error"):
+                done_ok[cid] = rec
+    return done_ok
+
+
+def _default_out_path(out_dir: str, model_prefix: str, ablation_types: list[str], months) -> str:
+    """Auto-name the output CSV, compacting the ablation tag if it would overflow NAME_MAX.
+
+    A long ``--ablation-type`` list joined verbatim can exceed the 255-byte per-component
+    filename limit (and the ``.partial.jsonl`` sibling adds 14 more). When that happens the tag
+    collapses to a deterministic ``multi<count>-<hash8>`` token (hash over the sorted type list)
+    so the filename stays stable run-to-run and the checkpoint still resumes.
+    """
+    month_tag = "all" if months is None else "-".join(str(m) for m in months)
+    abl_tag = "all" if set(ablation_types) == set(ABLATION_TYPES) else "-".join(ablation_types)
+    name = f"{model_prefix}_redecision_abl-{abl_tag}_month-{month_tag}.csv"
+    if len(name) + len(".partial.jsonl") > 240:
+        digest = hashlib.sha1("|".join(sorted(ablation_types)).encode()).hexdigest()[:8]
+        abl_tag = f"multi{len(ablation_types)}-{digest}"
+        name = f"{model_prefix}_redecision_abl-{abl_tag}_month-{month_tag}.csv"
+    return os.path.join(out_dir, name)
+
+
+def _finalize_df(results: list[dict]) -> pd.DataFrame:
+    """Build the output frame: dedup by ``custom_id`` (keep last) and sort for readability."""
+    df = pd.DataFrame(results)
+    if "custom_id" in df.columns:
+        df = df.drop_duplicates(subset="custom_id", keep="last")
+    sort_cols = [c for c in ("ablation_type", "sample_number", "date") if c in df.columns]
+    if sort_cols:
+        df = df.sort_values(sort_cols).reset_index(drop=True)
+    return df
+
+
+# =============================================================================
 # Re-decision
 # =============================================================================
 
@@ -168,10 +245,7 @@ def redecide_one(
     captured into the ``error`` field rather than raised, so one bad row never aborts the run.
     """
     observation = row["observation"]
-    custom_id = (
-        f"abl_{ablation_type}_n{row['sample_num']}"
-        f"_date{str(row['date']).replace('-', '')}"
-    )
+    custom_id = _make_custom_id(ablation_type, row["sample_num"], row["date"])
     out: dict = {
         "custom_id": custom_id,
         "source_file": row["source_file"],
@@ -268,6 +342,12 @@ def parse_args():
                    help="Concurrent requests (default: 6).")
     p.add_argument("--limit", type=int, default=None,
                    help="Cap the number of rows per ablation type (smoke testing).")
+    p.add_argument("--fresh", action="store_true",
+                   help="Ignore and delete any existing checkpoint, starting the run over.")
+    p.add_argument("--flush-every", type=int, default=100,
+                   help="Rewrite the output CSV snapshot every N completed re-decisions so "
+                        "progress is inspectable mid-run (0 disables; default: 100). The "
+                        "durable record is the per-row .partial.jsonl checkpoint regardless.")
     p.add_argument("--output", default=None,
                    help="Output CSV path. Default: output/ablation/<prefix>_redecision_abl-"
                         "<types>_month-<months>.csv. Never written under a live run's filename.")
@@ -326,51 +406,74 @@ def main():
 
     ctx = build_query_context(complexity_mode)
 
+    # Output path — a dedicated subdir, never a live run's filename. Resolved up front so the
+    # resumable checkpoint can live beside it.
+    out_dir = os.path.join(input_dir, "ablation")
+    if args.output:
+        out_path = os.path.abspath(args.output)
+        out_dir = os.path.dirname(out_path)
+    else:
+        out_path = _default_out_path(out_dir, args.model_prefix, ablation_types, months)
+    os.makedirs(out_dir, exist_ok=True)
+    ckpt_path = out_path + ".partial.jsonl"
+    print(f"  Output:         {os.path.basename(out_path)}")
+
     # Build the work list (one task per row x ablation type), applying the optional per-type cap.
     tasks: list[tuple[dict, str]] = []
     for ablation_type in ablation_types:
         selected = rows[: args.limit] if args.limit else rows
         tasks.extend((row, ablation_type) for row in selected)
 
-    print(f"  Total re-decisions: {len(tasks)}\n")
-
-    results: list[dict] = []
-    done = 0
-    with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
-        futures = {
-            ex.submit(
-                redecide_one, row, ablation_type,
-                complexity_mode=complexity_mode, ctx=ctx,
-                model_server=args.model_server, model=resolved.model,
-                model_kwargs=model_kwargs, openai_client=openai_client,
-            ): (row, ablation_type)
-            for row, ablation_type in tasks
-        }
-        for fut in as_completed(futures):
-            res = fut.result()
-            results.append(res)
-            done += 1
-            if done % 10 == 0 or done == len(tasks):
-                n_err = sum(1 for r in results if r["error"])
-                print(f"  [{done}/{len(tasks)}] complete  ({n_err} errors)")
-
-    df = pd.DataFrame(results)
-
-    # Output path — a dedicated subdir, never a live run's filename.
-    out_dir = os.path.join(input_dir, "ablation")
-    if args.output:
-        out_path = os.path.abspath(args.output)
-        out_dir = os.path.dirname(out_path)
+    # Resume: load prior successes and skip them; errored rows are retried.
+    if args.fresh and os.path.exists(ckpt_path):
+        os.remove(ckpt_path)
+        print(f"  --fresh: removed existing checkpoint {os.path.basename(ckpt_path)}")
+    done_ok = _load_checkpoint(ckpt_path)
+    pending = [
+        (row, ablation_type) for row, ablation_type in tasks
+        if _make_custom_id(ablation_type, row["sample_num"], row["date"]) not in done_ok
+    ]
+    if done_ok:
+        print(f"  Resuming from {os.path.basename(ckpt_path)}: "
+              f"{len(done_ok)} done, {len(pending)}/{len(tasks)} to do.\n")
     else:
-        abl_tag = "all" if set(ablation_types) == set(ABLATION_TYPES) else "-".join(ablation_types)
-        month_tag = "all" if months is None else "-".join(str(m) for m in months)
-        out_path = os.path.join(
-            out_dir, f"{args.model_prefix}_redecision_abl-{abl_tag}_month-{month_tag}.csv"
-        )
-    os.makedirs(out_dir, exist_ok=True)
+        print(f"  Total re-decisions: {len(tasks)}\n")
+
+    # Carry prior successes forward so the final CSV is complete even on a resumed run.
+    results: list[dict] = list(done_ok.values())
+    done = 0
+    n_pending = len(pending)
+    ckpt_fh = open(ckpt_path, "a", buffering=1)  # line-buffered append, durable per row
+    try:
+        with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
+            futures = {
+                ex.submit(
+                    redecide_one, row, ablation_type,
+                    complexity_mode=complexity_mode, ctx=ctx,
+                    model_server=args.model_server, model=resolved.model,
+                    model_kwargs=model_kwargs, openai_client=openai_client,
+                ): (row, ablation_type)
+                for row, ablation_type in pending
+            }
+            for fut in as_completed(futures):
+                res = fut.result()
+                results.append(res)
+                ckpt_fh.write(json.dumps(res, default=_json_default) + "\n")
+                ckpt_fh.flush()
+                done += 1
+                if done % 10 == 0 or done == n_pending:
+                    n_err = sum(1 for r in results if r.get("error"))
+                    print(f"  [{done}/{n_pending}] complete  ({n_err} errors so far)")
+                if args.flush_every and done % args.flush_every == 0:
+                    _finalize_df(results).to_csv(out_path, index=False)  # progress snapshot
+    finally:
+        ckpt_fh.close()
+
+    df = _finalize_df(results)
     df.to_csv(out_path, index=False)
 
     print(f"\nWrote {len(df)} re-decisions -> {out_path}")
+    print(f"Checkpoint: {ckpt_path}  (re-run the same command to resume; --fresh to start over)")
     _summary(df, complexity_mode)
 
 
