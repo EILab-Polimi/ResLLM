@@ -102,6 +102,14 @@ INSTRUCTIONS_RED_HERRING = dedent("""\
     - Puppies like to play, explore their surroundings with boundless curiosity, and chew on just about everything they can get their teeth on. They also love to sleep deeply after their bursts of energy, often curling up in the coziest spots they can find.
     """)
 
+# Seasonal-pacing cue (always emitted in complex mode). Grounds the agent in the hydrology of the
+# supplemental demand — it is autumn/winter-light and peaks in late spring/summer — so it reserves
+# winter storage for the summer demand peak instead of front-loading delivery. A behavioral pacing
+# prior, not a directive to reproduce any particular historical operation.
+INSTRUCTIONS_SEASONAL_PACING = dedent("""\
+    - The supplemental downstream-flow demand is not spread evenly through the year: it is lightest in autumn and winter and rises to a peak in late spring and summer (roughly May through July), when downstream needs are greatest and natural inflow is receding. In wet winters, high inflows and flood-control releases already carry ample flow downstream, so delivering supplemental from storage then adds little while spending water that is far more valuable held into the dry summer when the demand peaks and inflow is low. Unless storage is high and the season is clearly wet, lean toward conserving storage through autumn and winter and meeting the larger supplemental demand as it arrives in spring and summer, rather than drawing storage down early.
+    """)
+
 INSTRUCTIONS_IMPORTANCE_RANKING = dedent("""\
     - Assign an importance ranking ("very high"=1, "high"=2, "medium"=3, "low"=4, or "no importance"=0) to the reservoir management concepts supporting your decision.
     """)
@@ -118,7 +126,7 @@ INSTRUCTIONS_COMPLEX = dedent("""\
 # Carryover instruction: a target >= 0 makes the operation defend it with an automatic
 # release cap on the two supply deliveries; -1 leaves it unenforced.
 INSTRUCTIONS_CARRYOVER = dedent("""\
-    - The carryover target paces how fast you draw storage down: committing a target (any value of 0 or greater) tells the operation to cap your junior committed and supplemental deliveries so storage stays at or above it through the rest of the operating window. It throttles only those two supply deliveries — it never reduces the minimum flow (which you set separately with meet_min_flow), the senior committed deliveries, or flood-control releases, and it can never hold storage above the flood-control limit. You decide the target yourself from the conditions — there is no suggested level. Raise the target to conserve supply for later in the year or across a multiyear drought; lower it, or set it to -1 (no target), to deliver supply more fully now. You commit a carryover storage target each month.
+    - The carryover target paces how fast you draw storage down: committing a target (any value of 0 or greater) tells the operation to hold storage at or above it through the rest of the operating window by automatically slowing your supply deliveries. It defends the target by reducing the two lowest-priority deliveries you set this month — the supplemental downstream flow first, then the junior committed deliveries — overriding the allocation_percent and junior_delivery_percent you chose whenever holding the floor requires it. It never reduces the minimum flow (which you set separately with meet_min_flow), the senior committed deliveries, or flood-control releases, and it can never hold storage above the flood-control limit. It is a floor, not a refill goal: it cannot add water to storage, so a target above your current storage simply means delivering as little supply as possible until inflow lifts storage toward it. You decide the target yourself from the conditions — there is no suggested level. Raise the target to conserve supply for later in the year or across a multiyear drought; lower it, or set it to -1 (no target), to deliver supply more fully now. You commit a carryover storage target each month.
     """)
 
 INSTRUCTIONS_FORECAST_COMPLEX = dedent("""\
@@ -220,7 +228,7 @@ OBSERVATION_ALLOCATION_DECISION_COMPLEX = dedent("""\
     - allocation_percent: the percent (0-100) of the supplemental downstream-flow demand to deliver this month (default 100; below 100 is a real shortage to downstream support, justified only when conservation is genuinely needed).
     - junior_delivery_percent: the percent (0-100) of the junior committed deliveries to make this month (default 100; below 100 is a committed water-supply shortage, justified only in dry or low-storage conditions).
     - meet_min_flow: whether to deliver the full required minimum downstream flow this month (true) or curtail it to the firm regulatory floor (false). Curtailing is a regulatory violation — choose false only as a last resort in the most extreme low-storage conditions, and only after you have already set allocation_percent = 0 and junior_delivery_percent = 0 (never curtail the minimum flow while still delivering lower-priority supplemental or junior water).
-    - carryover_target_taf: the end-of-season storage you commit to leave in the reservoir, in TAF. It caps your junior committed and supplemental deliveries to keep storage at or above the target — it never reduces the minimum flow (set separately by meet_min_flow), the senior deliveries, or flood-control releases, and never holds storage above the flood-control limit. Raise it to conserve supply for later in the year or a multiyear drought; lower it, or use -1 (no target), to deliver supply more fully now.
+    - carryover_target_taf: a floor on storage you commit to hold through the rest of the season, in TAF. It defends the floor by automatically reducing your supplemental delivery first, then your junior committed delivery — overriding the allocation_percent and junior_delivery_percent above when needed — but never the minimum flow (set separately by meet_min_flow), the senior deliveries, or flood-control releases, and it never holds storage above the flood-control limit. It cannot add water to storage, so setting it above your current storage just means delivering minimal supply until inflow lifts storage toward it. Raise it to conserve supply for later in the year or a multiyear drought; lower it, or use -1 (no target), to deliver supply more fully now.
     """)
 
 
@@ -334,8 +342,8 @@ def build_instructions(
             a reduced schema without ``allocation_concept_importance``.
         complexity_mode: Append the complex operating-context instructions
             (demand tiers, min flow, forecast-based flood curve, carryover
-            target) and the richer forecast description. When False the output
-            is byte-identical to the simple baseline.
+            target, seasonal-pacing cue) and the richer forecast description.
+            When False the output is byte-identical to the simple baseline.
     """
     # Base framing + supply-scale context. Complex mode frames the decision as two
     # curtailable demands (junior committed supply + supplemental downstream flow) above a
@@ -391,6 +399,7 @@ def build_instructions(
         instructions += INSTRUCTIONS_CARRYOVER
         if reservoir.characteristics["wy_forecast_file"] is not False:
             instructions += INSTRUCTIONS_FORECAST_COMPLEX
+        instructions += INSTRUCTIONS_SEASONAL_PACING
 
     if include_red_herring:
         instructions += INSTRUCTIONS_RED_HERRING

@@ -122,6 +122,14 @@ complexity:
     winter_nearterm_lo: 400
     winter_nearterm_hi: 1550
     # aggressive_floor_curve: optional [[dowy...], [tocs...]] lower bound (omitted)
+    # Deep-winter historical relaxation (applied only under --tocs dynamic_hist_cap). Within this
+    # day-of-water-year window, on flood-proximate days (observed storage at/above the dynamic
+    # curve, i.e. between the dynamic TOCS and the static WCD), the flood limit is RAISED to
+    # min(static WCD, observed historical storage): the agent may hold up to where Folsom actually
+    # held that day, but no higher. Outside the window, or below the dynamic curve, the dynamic
+    # curve governs unchanged. Nov 19 = dowy 50, Feb 28 = dowy 151 (leap days dropped).
+    historical_cap_start_dowy: 50
+    historical_cap_end_dowy: 151
 
   # Carryover storage target: fully LLM-governed, not configured here. When the agent commits a
   # carryover_target_taf >= 0, the release-cap defense rations drawdown to hold storage at or above
@@ -179,6 +187,13 @@ complexity:
     months_mowy: [2, 3, 4, 5, 6, 7, 8]   # Nov, Dec, Jan, Feb, Mar, Apr, May
     full_above_taf: 450
     zero_below_taf: 200
+    # Seasonal pacing of the supplemental demand. In the deep-winter months below, the demand the
+    # agent draws storage against follows the stricter thresholds here (unless storage is ample),
+    # deferring delivery toward the summer-peaked demand. Always active in complex mode; remove these
+    # winter_* keys to fall back to the base full_above_taf/zero_below_taf in winter too.
+    winter_months_mowy: [2, 3, 4, 5]     # Nov, Dec, Jan, Feb
+    winter_full_above_taf: 600
+    winter_zero_below_taf: 250
 
   # Committed upstream M&I (CalSim D_FOLSM* + D_NTOMA_FSC003), released from storage as part of rt
   # (Σ≈155 TAF/yr). senior_frac = firm water-rights (Σ_WR arcs, always met) share of the total

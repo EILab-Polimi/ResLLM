@@ -271,11 +271,14 @@ def run_single_sample(
                 rt, st = R1.evaluate(
                     st_1=st_1, qt=qt, uu=uu, tocs=tocs,
                     min_flow=min_flow_floor, release_cap=release_cap, senior_floor=firm_floor,
-                    # The carryover cap throttles ONLY the discretionary supplemental/delta
-                    # layer; everything in cap_protect (chosen min flow, senior, chosen junior
-                    # M&I) is honored. So the carryover target is defended by curtailing
-                    # supplemental, and breached only when zero supplemental still can't hold it.
-                    cap_protect=min_flow_target + umi_senior + junior_target,
+                    # The carryover cap defends the target by curtailing the two lowest-priority
+                    # supply layers in priority order — supplemental first, then junior committed
+                    # M&I — down to cap_protect (the agent's chosen min flow + senior M&I, which
+                    # the cap never cuts). Because the realized rt is attributed min flow → senior
+                    # → junior → supplemental below, a binding cap zeroes supplemental before it
+                    # touches junior. The target is breached only when even zero supplemental and
+                    # zero junior cannot hold it.
+                    cap_protect=min_flow_target + umi_senior,
                     # observed evaporative loss from storage (S = S_1 + Q − rt − E)
                     evaporation=evap_t,
                 )
@@ -382,10 +385,10 @@ def main():
     if resolved_model_config.warnings:
         print()
 
-    if args.tocs in ['fixed', 'historical', 'dynamic']:
+    if args.tocs in ['fixed', 'historical', 'dynamic', 'dynamic_hist_cap']:
         tocs = args.tocs
     else:
-        raise ValueError("TOCS must be 'fixed', 'historical', or 'dynamic'")
+        raise ValueError("TOCS must be 'fixed', 'historical', 'dynamic', or 'dynamic_hist_cap'")
 
     # complexity mode: CLI override, else config's complexity.enabled
     complexity_block = config.get("complexity")
@@ -395,13 +398,13 @@ def main():
         complexity_mode = args.complexity
     if complexity_mode and complexity_block is None:
         raise ValueError("--complexity requires a 'complexity' block in the config")
-    if tocs == "dynamic":
+    if tocs in ("dynamic", "dynamic_hist_cap"):
         if not complexity_mode:
-            raise ValueError("--tocs dynamic requires complexity mode (a 'complexity' config block)")
+            raise ValueError(f"--tocs {tocs} requires complexity mode (a 'complexity' config block)")
         if args.wy_forecast_file is None:
-            raise ValueError("--tocs dynamic requires --wy-forecast-file")
+            raise ValueError(f"--tocs {tocs} requires --wy-forecast-file")
         if args.wy_monthly_forecast_file is None:
-            raise ValueError("--tocs dynamic requires --wy-monthly-forecast-file")
+            raise ValueError(f"--tocs {tocs} requires --wy-monthly-forecast-file")
     if complexity_mode:
         print(f"  Complexity mode: ENABLED")
 
@@ -512,8 +515,10 @@ def parse_args():
         "--tocs",
         type=str,
         default="fixed",
-        help="How to handle TOCS (fixed, historical, or dynamic). 'dynamic' requires "
-             "complexity mode plus --wy-forecast-file and --wy-monthly-forecast-file.",
+        help="How to handle TOCS (fixed, historical, dynamic, or dynamic_hist_cap). 'dynamic' and "
+             "'dynamic_hist_cap' require complexity mode plus --wy-forecast-file and "
+             "--wy-monthly-forecast-file. 'dynamic_hist_cap' adds a deep-winter relaxation that "
+             "raises the limit to min(static WCD, observed storage) on flood-proximate days.",
     )
     parser.add_argument(
         "--wy-monthly-forecast-file",

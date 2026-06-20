@@ -23,16 +23,16 @@ Method (mirrors ``simulate.py`` / ``reservoir.py``):
     ``Reservoir.update_monthly_min_flow`` and held across the month.
   - The observed release is attributed across the priority stack
     (MIF -> senior M&I -> junior M&I -> supplemental); each layer's shortfall is
-    ``max(0, demand - served)``. The remainder above the full stack is colored by a
-    calendar+storage rule identical to the LLM run's (analysis/complex_helper._add_derived),
-    so both policies share one definition: supplemental in Jul-Oct (mowy 10,11,12,1 — no
-    flood risk) and flood spill in Nov-Jun (mowy 2-9 — the flood-reservation season),
-    EXCEPT May-June below 800 TAF (well under the flood pool) and, YEAR-ROUND, storage more
-    than 50 TAF below the operating flood curve (``tocs_day``, not flood-proximate) — both
-    supplemental. ``delta_delivered`` stays at the modeled demand on disk (the analysis
-    layer folds the Jul-Oct supplemental surplus into delivery when plotting); ``spill``
-    carries the Nov-Jun flood-proximate surplus. The transferred dynamic ``tocs`` gates the
-    year-round condition and is recorded as a storage-panel reference.
+    ``max(0, demand - served)``. The remainder above the full stack is split into supplemental vs
+    flood spill (matching analysis/complex_helper._add_derived, historical branch): surplus is
+    FLOOD SPILL only inside the flood season — Nov 1 (dowy 32) through June 15 (dowy 258) — AND
+    within 100 TAF of / above the operating flood curve (``tocs_day``). Everything else is
+    supplemental: the post-June-15 / October fall-drawdown release (no flood risk) and any day
+    storage sits more than 100 TAF below the curve (not flood-proximate). ``delta_delivered`` stays
+    at the modeled demand met on disk (the analysis layer folds the supplemental surplus into
+    delivery when plotting). The transferred dynamic ``tocs`` gates the below-curve condition and
+    is recorded as a storage-panel reference. (The agent's own run needs no rule here — its
+    supplemental is the recorded allocation and all its surplus is dynamic-curve flood spill.)
 
 Uses ONLY the observed ``outflow`` — never CalSim deliveries. CalSim only set the demand
 magnitudes (read here from the complex config via the ``Reservoir``).
@@ -183,23 +183,22 @@ def backcalc(R: Reservoir, hist: pd.DataFrame, dyn_tocs: dict[str, float] | None
             delta_served = min(served, delta_demand);  served -= delta_served
             surplus = served            # observed release above the full demand stack
 
-            # Calendar + storage rule for the surplus (identical to analysis/complex_helper.
-            # _add_derived): above-demand release is SUPPLEMENTAL in Jul-Oct (mowy 10,11,12,1 —
-            # no flood risk) and FLOOD SPILL in Nov-Jun (mowy 2-9 — the flood-reservation
-            # season), EXCEPT May-June (mowy 8-9) below 800 TAF (under the flood pool) OR, year-
-            # round, storage more than 50 TAF below the operating flood curve (`tocs_day`, not
-            # flood-proximate) — both supplemental. No separate pass-through bucket.
-            # delta_delivered stays capped at the modeled demand on disk; the analysis layer
-            # folds the Jul-Oct supplemental surplus into delivery when plotting. delta_short is
-            # the true supplemental shortfall (short days carry no surplus). tocs_day is recorded
-            # only as a storage-panel reference, no longer used to gate spill.
+            # Surplus split for the observed record (identical to analysis/complex_helper.
+            # _add_derived, historical branch): above-demand release is FLOOD SPILL only inside the
+            # flood season — Nov 1 (dowy 32) through June 15 (dowy 258) — AND within 100 TAF of /
+            # above the operating flood curve (`tocs_day`). Everything else is SUPPLEMENTAL: the
+            # post-June-15 / October fall-drawdown release (no flood risk) and any day storage sits
+            # more than 100 TAF below the curve (not flood-proximate). delta_delivered stays at the
+            # modeled demand met on disk; the analysis layer folds the supplemental surplus into
+            # delivery when plotting. delta_short is the true supplemental shortfall (short days
+            # carry no surplus). (The agent's own run needs no rule — its supplemental is the
+            # recorded allocation and all its surplus is dynamic-curve flood spill.)
             tocs_day = float(dyn_tocs.get(row["date"].strftime("%Y-%m-%d"),
                                           np.interp(dowy, tocs_tp, tocs_curve)))
             cur_st = (float(row["storage"]) if not pd.isna(row.get("storage"))
                       else float(row["prev_storage"]))
-            is_supp = (mowy in (10, 11, 12, 1)
-                       or (mowy in (8, 9) and cur_st < 800.0)
-                       or (cur_st < tocs_day - 50.0))   # year-round: not flood-proximate
+            is_supp = (dowy < 32 or dowy > 258           # outside the Nov 1-June 15 flood season
+                       or cur_st < tocs_day - 100.0)      # or not flood-proximate (below the curve)
             spill = 0.0 if is_supp else surplus
             passthrough = 0.0
 

@@ -155,9 +155,19 @@ class Reservoir:
                 self._supp_ls_months = {int(m) for m in _ls.get("months_mowy", [])}
                 self._supp_ls_full = float(_ls.get("full_above_taf", 0.0))
                 self._supp_ls_zero = float(_ls.get("zero_below_taf", 0.0))
+                # Seasonal pacing of the supplemental demand: in the deep-winter months
+                # (`winter_months_mowy`) the demand the agent draws storage against follows the
+                # stricter `winter_full_above_taf` / `winter_zero_below_taf` thresholds, deferring
+                # delivery toward the summer-peaked demand. Defaults to the base thresholds (no
+                # change) when the winter keys are absent.
+                self._supp_ls_winter_months = {int(m) for m in _ls.get("winter_months_mowy", [])}
+                self._supp_ls_winter_full = float(_ls.get("winter_full_above_taf", self._supp_ls_full))
+                self._supp_ls_winter_zero = float(_ls.get("winter_zero_below_taf", self._supp_ls_zero))
             else:
                 self._supp_ls_months = set()
                 self._supp_ls_full = self._supp_ls_zero = 0.0
+                self._supp_ls_winter_months = set()
+                self._supp_ls_winter_full = self._supp_ls_winter_zero = 0.0
 
             # Minimum-flow standard (Lower American River Flow Management Standard, ARWA-103):
             # storage-driven Oct–Feb (Four Reservoir Index + Jan/Feb storage triggers),
@@ -414,9 +424,10 @@ class Reservoir:
 
         Parameters:
             dowy (int): Day of the water year (1-365/366).
-            date (str): Date in 'YYYY-MM-DD' format (used by the ``historical`` mode).
+            date (str): Date in 'YYYY-MM-DD' format (used by the ``historical`` and
+                ``dynamic_hist_cap`` modes to look up observed storage).
             near_term (float): Forecasted near-term inflow outlook (TAF), driving the winter
-                regime of the ``"dynamic"`` curve. Complex mode.
+                regime of the ``"dynamic"`` / ``"dynamic_hist_cap"`` curves. Complex mode.
         Returns:
             float: Top of Conservation Storage (TAF).
         """
@@ -432,8 +443,34 @@ class Reservoir:
             return tocs
         elif self.tocs == "dynamic":
             return self._compute_dynamic_tocs(dowy, float(tocs), near_term)
+        elif self.tocs == "dynamic_hist_cap":
+            return self._compute_dynamic_hist_cap_tocs(dowy, float(tocs), near_term, date)
         else:
             return self.characteristics["operable_storage_max"]
+
+    def _compute_dynamic_hist_cap_tocs(self, dowy, base_tocs, near_term, date):
+        """Dynamic flood curve with a deep-winter historical relaxation (``dynamic_hist_cap`` mode).
+
+        The base is the forecast-based :meth:`_compute_dynamic_tocs` curve. Within the configured
+        winter window (``dynamic_tocs.historical_cap_start_dowy`` .. ``historical_cap_end_dowy``,
+        default Nov 19 = dowy 50 .. Feb 28 = dowy 151), on **flood-proximate** days — observed
+        storage at or above the dynamic curve, i.e. in the band between the dynamic TOCS and the
+        static WCD — the limit is RAISED to ``min(static WCD, observed historical storage)``. So the
+        agent may hold up to where Folsom actually held that day but no higher; this is a pure
+        relaxation (never below the dynamic curve). Outside the window, on days below the dynamic
+        curve, or when the date has no observed storage, the dynamic curve governs unchanged.
+        """
+        dyn = self._compute_dynamic_tocs(dowy, base_tocs, near_term)
+        cfg = self.complexity["dynamic_tocs"]
+        lo = cfg.get("historical_cap_start_dowy", 50)
+        hi = cfg.get("historical_cap_end_dowy", 151)
+        if lo <= dowy <= hi and date is not None:
+            rows = self.inflows.loc[self.inflows["date"] == date, "storage"]
+            if len(rows) and not pd.isna(rows.values[0]):
+                hist_st = float(rows.values[0])
+                if hist_st >= dyn:                       # flood-proximate: between dynamic TOCS and static
+                    return float(min(base_tocs, hist_st))  # cap at min(static WCD, historical)
+        return dyn
 
     def _compute_dynamic_tocs(self, dowy, base_tocs, near_term):
         """Forecast-based two-regime flood-control curve (CalSim abstraction).
@@ -718,12 +755,23 @@ class Reservoir:
         interpolated between — applied only in ``supplemental_low_storage.months_mowy`` (Nov–May).
         Returns 1.0 when storage is unknown, no relaxation is configured, or the month is
         outside the window (leaving summer and storage-independent behaviour unchanged).
+
+        Seasonal pacing: in the deep-winter months ``winter_months_mowy`` the stricter
+        ``winter_full_above_taf`` / ``winter_zero_below_taf`` thresholds apply instead,
+        moderating the winter demand the agent draws storage against so delivery defers toward
+        the summer peak.
         """
-        if (st is None or mowy not in self._supp_ls_months
-                or self._supp_ls_full <= self._supp_ls_zero):
+        if st is None or mowy not in self._supp_ls_months:
             return 1.0
-        span = self._supp_ls_full - self._supp_ls_zero
-        return float(min(1.0, max(0.0, (float(st) - self._supp_ls_zero) / span)))
+        full, zero = self._supp_ls_full, self._supp_ls_zero
+        # Seasonal pacing: in the deep-winter months use the stricter winter thresholds so the
+        # supplemental demand moderates unless storage is ample, deferring delivery toward the
+        # summer peak.
+        if mowy in self._supp_ls_winter_months:
+            full, zero = self._supp_ls_winter_full, self._supp_ls_winter_zero
+        if full <= zero:
+            return 1.0
+        return float(min(1.0, max(0.0, (float(st) - zero) / (full - zero))))
 
     def _supplemental_taf_month(self, mowy: int, ari: float | None = None,
                                 st: float | None = None) -> float:
