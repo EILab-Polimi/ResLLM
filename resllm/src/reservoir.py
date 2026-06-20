@@ -451,7 +451,7 @@ class Reservoir:
     def _compute_dynamic_hist_cap_tocs(self, dowy, base_tocs, near_term, date):
         """Dynamic flood curve with a deep-winter historical relaxation (``dynamic_hist_cap`` mode).
 
-        The base is the forecast-based :meth:`_compute_dynamic_tocs` curve. Within the configured
+        The base is the dynamic :meth:`_compute_dynamic_tocs` curve. Within the configured
         winter window (``dynamic_tocs.historical_cap_start_dowy`` .. ``historical_cap_end_dowy``,
         default Nov 19 = dowy 50 .. Feb 28 = dowy 151), on **flood-proximate** days — observed
         storage at or above the dynamic curve, i.e. in the band between the dynamic TOCS and the
@@ -473,17 +473,23 @@ class Reservoir:
         return dyn
 
     def _compute_dynamic_tocs(self, dowy, base_tocs, near_term):
-        """Forecast-based two-regime flood-control curve (CalSim abstraction).
+        """Two-regime flood-control curve conditioned on the near-term inflow outlook.
 
-        Modeled in flood-space terms (``flood_space = K - tocs``), reusing the fixed
-        ``tp_to_tocs`` curve as the date-based baseline:
+        Monthly-step abstraction of Folsom's historical (pre-2017-WCM-Update) interim flood
+        operation, in which the variable flood reservation was set by an upstream-storage credit:
+        up to ~200 TAF of empty space in the upstream American River reservoirs (French Meadows,
+        Hell Hole, Union Valley) was credited against the reservation Folsom had to hold. The
+        near-term inflow outlook is the monthly proxy for that upstream space. Modeled in
+        flood-space terms (``flood_space = K - tocs``), reusing the fixed ``tp_to_tocs`` curve as
+        the date-based baseline:
 
-        - **Winter (flood season):** reserve the baseline space, increased when the near-term
-          inflow outlook is wet (storm-risk encroachment; mirrors CalSim's ``OctMarRunoffEst``
-          threshold). More forecast inflow -> lower TOCS -> more forced evacuation.
+        - **Winter (flood season):** reserve the baseline space, deepened (by up to
+          ``max_winter_encroachment_taf``, = the interim 200,000-af upstream credit) as the
+          near-term outlook turns wet -- a wet outlook implies the upstream reservoirs are filling
+          and have less empty space to credit, so Folsom must hold more reservation itself. More
+          forecast inflow -> lower TOCS -> more forced evacuation.
         - **Rest of year (fall drawdown / spring refill):** TOCS follows the static WCD rule
-          curve directly (``base_tocs``). Per the 2017 WCM Update, no forecast-based flood
-          space applies outside the Nov 19–Feb 28 variable-reserve window.
+          curve directly (``base_tocs``); no variable reservation applies outside the winter window.
 
         Returns the TOCS (TAF), clipped to ``[0, K]``.
         """
@@ -624,10 +630,13 @@ class Reservoir:
         return max(float(wy_index) - float(spill_vol), 0.0)
 
     def near_term_inflow(self, date) -> float:
-        """Forecasted near-term inflow outlook (TAF) for the dynamic flood curve.
+        """Forecasted near-term inflow outlook (TAF), a proxy for upstream flood-space availability.
 
-        Reads the committed monthly-forecast file (``nt3_mean``). Returns ``0.0`` when
-        no monthly forecast is available or the date is missing.
+        Drives the winter regime of the dynamic flood curve. Reads the committed monthly-forecast
+        file (``nt3_mean``, ~3-month-ahead inflow), which stands in for how much empty flood-storage
+        space the upstream American River reservoirs hold -- the quantity that conditioned Folsom's
+        historical flood reservation. Returns ``0.0`` when no monthly forecast is available or the
+        date is missing.
         """
         if self.monthly_forecast is None:
             return 0.0

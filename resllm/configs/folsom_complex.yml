@@ -12,10 +12,10 @@ folsom_reservoir:
   sp_to_ep: [[0, 48, 93, 142, 192, 240, 288, 386, 678, 977],
              [210, 305, 332, 351, 365, 376, 385, 401, 437, 466]]
   # day of water year to top of conservation storage (TAF). Deep-winter floor (dowy 50=Nov19
-  # to dowy 151=Feb28) = 575 TAF = the NORMAL Folsom flood target (reserve 400 TAF of ~975 pool),
-  # per the 2017 WCM Update Selected Plan (Alt 2). Mar refill rises toward full pool. The dynamic
-  # curve draws this floor DOWN toward the 600-TAF max reservation via
-  # dynamic_tocs.max_winter_encroachment_taf.
+  # to dowy 151=Feb28) = 575 TAF = the minimum Folsom flood reservation (400 TAF of ~975 pool)
+  # under the historical (pre-2017-WCM-Update) interim operation. Mar refill rises toward full
+  # pool. The dynamic curve draws this floor DOWN toward the 600-TAF max reservation via
+  # dynamic_tocs.max_winter_encroachment_taf (= the interim operation's 200,000-af upstream credit).
   tp_to_tocs: [[0, 50, 151, 200, 243, 366],
                [975, 575, 575, 750, 975, 975]]
   # storage to release relationship (TAF to cfs), from the Folsom Dam flood control rule curves:
@@ -106,15 +106,17 @@ complexity:
     offramp_cfs_jansep: 250
     offramp_cfs_octdec: 500
 
-  # Forecast-based flood curve (forced; flood_space = K - tocs), calibrated to the 2017 WCM
-  # Update Selected Plan (Alt 2, Forecast-Informed Operations): variable flood space 400-600 TAF
-  # => TOCS 575 (reserve 400, NORMAL) <-> 375 (reserve 600, wet extreme). Forecast-based flood
-  # space applies ONLY in the WCM winter window (Nov 19-Feb 28), so flood_season_mowy = [2,5]:
+  # Dynamic flood curve (forced; flood_space = K - tocs). Monthly-step abstraction of Folsom's
+  # historical (pre-2017-WCM-Update) interim operation, in which the variable flood reservation was
+  # set by an upstream-storage credit (up to 200,000 af of empty space in French Meadows, Hell Hole,
+  # and Union Valley credited against Folsom's requirement). Variable reservation 400-600 TAF
+  # => TOCS 575 (reserve 400, dry/full-credit) <-> 375 (reserve 600, wet/no-credit). The variable
+  # reservation applies ONLY in the winter window (Nov-Feb), so flood_season_mowy = [2,5]:
   #   Winter (mowy 2-5): hold the 575-TAF baseline, drawn DOWN toward the 375-TAF max-reservation
-  #     as the near-term outlook scales lo->hi (max_winter_encroachment_taf = 200, a monthly proxy
-  #     for the WCM's event-driven 300-TAF/5-day forecast drawdown).
-  #   Fall/spring (rest of year): TOCS = static tp_to_tocs curve (the WCM applies no forecast-based
-  #     flood space outside the winter window).
+  #     as the near-term outlook scales lo->hi (max_winter_encroachment_taf = 200 = the interim
+  #     200,000-af upstream credit; the near-term outlook is a monthly proxy for upstream space).
+  #   Fall/spring (rest of year): TOCS = static tp_to_tocs curve (no variable reservation outside
+  #     the winter window).
   # winter_nearterm lo/hi = 400/1550 ≈ 10th/90th pct of the winter near-term forecast (398/1558 TAF).
   dynamic_tocs:
     flood_season_mowy: [2, 5]
