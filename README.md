@@ -43,7 +43,6 @@ ResLLM/
 │   ├── simulate.py          # Main entry point
 │   ├── configs/             # Reservoir configuration YAML files
 │   ├── output/              # Simulation results
-│   ├── batch/               # OpenAI Batch API tools for ablation studies
 │   └── src/                 # Reservoir model, LLM operators, prompts, utilities
 ├── data/                    # Inflow, demand, and forecast input files
 ├── benchmarks/              # DP and MLP baselines

@@ -6,14 +6,13 @@ resllm.ablation
 Single source of truth for prompt *ablation* — removing one element from a rendered
 reservoir-operator prompt to measure that element's influence on the allocation decision.
 
-Three consumers share this module:
-  * the OpenAI Batch builder (``batch/src/create_ablation_batch_requests.py``) — simple mode,
+Two consumers share this module:
   * the online full ablated simulation (``simulate.py`` / ``operator.py``) — Option A,
   * the online re-decision study (``run_ablation_redecision.py``) — Option B.
 
 Two prompt modes are supported:
-  * **simple** — patterns *frozen* (copied verbatim from the original batch builder) so the
-    published simple-mode study reproduces byte-for-byte. They match the historical rendered
+  * **simple** — patterns *frozen* so the published simple-mode ablation study reproduces
+    byte-for-byte. They match the historical rendered
     prompt text, which differs slightly from the current ``prompts.py``, so they are NOT
     re-derived from the current templates.
   * **complex** — patterns written against the current ``src/prompts.py`` constants;
@@ -53,7 +52,7 @@ from src.prompts import (
 # Ablation taxonomy
 # =============================================================================
 
-# Simple-mode types — frozen to reproduce the published OpenAI-Batch ablation study.
+# Simple-mode types — frozen to reproduce the published simple-mode ablation study byte-for-byte.
 SIMPLE_ABLATION_TYPES: tuple[str, ...] = (
     "current_storage",
     "forecasts",
@@ -89,7 +88,7 @@ ABLATION_TYPES: tuple[str, ...] = (
 # Structural ablations replace the message rather than removing an element.
 STRUCTURAL_ABLATION_TYPES: tuple[str, ...] = ("no_system", "minimal", "bare_minimal")
 
-# Stub prompts for the structural ablations (verbatim from the batch builder).
+# Stub prompts for the structural ablations.
 MINIMAL_PROMPT = (
     "You are operating a water-supply reservoir. Provide a percent allocation "
     "decision (from 0-100 percent) which continues or updates the allocation."
@@ -129,11 +128,11 @@ def split_system_and_user(observation: str) -> tuple[str, str]:
 # =============================================================================
 
 def _remove_simple(observation: str, ablation_type: str, strip: set[str]) -> str:
-    """Frozen copy of the original batch ``remove_element_from_observation``.
+    """Frozen simple-mode element removal, preserved byte-for-byte for study reproduction.
 
     ``strip`` names the always-removed lines (importance ranking / puppies). Pass
-    ``{"importance_ranking", "red_herring"}`` to reproduce the batch pipeline (which strips
-    both unconditionally); the online paths pass a narrower (often empty) set.
+    ``{"importance_ranking", "red_herring"}`` to strip both unconditionally; the online paths
+    pass a narrower (often empty) set.
     """
     lines = observation.split("\n")
     filtered_lines: list[str] = []
@@ -475,10 +474,11 @@ def remove_element_from_observation(
         ablation_type: Which element to remove (see :data:`ABLATION_TYPES`).
         complexity_mode: Use the complex-prompt patterns; otherwise the frozen simple-mode
             patterns (byte-identical to the published study).
-        extra_strip: Extra always-removed elements. The batch pipeline passes
-            ``("importance_ranking", "red_herring")`` for its reduced-schema behavior; the
-            online faithful paths pass ``()`` to keep concept rankings and the red herring
-            (the red herring stays removable via ``ablation_type="red_herring"``).
+        extra_strip: Extra always-removed elements. Passing
+            ``("importance_ranking", "red_herring")`` drops concept rankings and the red herring
+            unconditionally (reduced-schema behavior); the online faithful paths pass ``()`` to
+            keep concept rankings and the red herring (the red herring stays removable via
+            ``ablation_type="red_herring"``).
     """
     if ablation_type not in ABLATION_TYPES:
         raise ValueError(

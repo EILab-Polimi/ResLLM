@@ -257,7 +257,7 @@ CONCEPT_KEYS_COMPLEX_EXTRA: tuple[str, ...] = (
 
 CONCEPT_KEYS_COMPLEX: tuple[str, ...] = CONCEPT_KEYS_SIMPLE + CONCEPT_KEYS_COMPLEX_EXTRA
 
-# Backward-compatible alias (simple baseline + batch pipeline import this name).
+# Backward-compatible alias for the simple baseline.
 CONCEPT_KEYS: tuple[str, ...] = CONCEPT_KEYS_SIMPLE
 
 
@@ -279,7 +279,7 @@ def build_ollama_json_instruction(
 
     ``include_concept_importance`` controls whether the ``allocation_concept_importance``
     rankings are requested; ablation runs disable it so the model is not asked to rank
-    concepts that may have been removed from the prompt (mirrors the batch pipeline).
+    concepts that may have been removed from the prompt.
     """
     fields = "allocation_reasoning, allocation_percent"
     if complexity_mode:
@@ -338,8 +338,8 @@ def build_instructions(
         reservoir: Reservoir (or shim) exposing a ``characteristics`` dict.
         include_red_herring: Append the puppies ablation text.
         include_importance_ranking: Append the concept importance-ranking
-            instruction. Disable for the batch ablation pipeline, which uses
-            a reduced schema without ``allocation_concept_importance``.
+            instruction. Disable for ablation runs, which use a reduced schema
+            without ``allocation_concept_importance``.
         complexity_mode: Append the complex operating-context instructions
             (demand tiers, min flow, forecast-based flood curve, carryover
             target, seasonal-pacing cue) and the richer forecast description.

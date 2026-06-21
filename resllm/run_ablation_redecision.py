@@ -6,9 +6,8 @@ resllm.run_ablation_redecision  —  Option B: online prompt-ablation re-decisio
 Takes a *previous* simulation's recorded prompts (the ``observation`` column of its
 ``decision_output`` CSVs), removes one element from each, re-queries the model, and writes the
 new decisions alongside the originals so the shift in the decision distribution can be
-compared. The Ollama-friendly analog of the OpenAI Batch ablation pipeline
-(``batch/src/create_ablation_batch_requests.py``): same idea, but it hits the Ollama / OpenAI
-*synchronous* SDKs concurrently (Ollama has no batch-upload endpoint).
+compared. It re-queries the Ollama / OpenAI *synchronous* SDKs concurrently, re-deciding each
+recorded prompt in its own worker thread.
 
 It is a re-DECISION on recorded observations, NOT a re-simulation — the reservoir is never
 stepped. It reuses, rather than re-implements, the operator's call layer:
@@ -27,7 +26,8 @@ of a complex DeepSeek run with the minimum-flow line removed, using a fast local
         --model-server Ollama --model gpt-oss:20b --reasoning-effort high \
         --max-workers 6
 
-Output goes to ``output/ablation/`` (a dedicated subdirectory — never a live run's filename).
+Output always goes to ``resllm/output/ablation/`` (a dedicated subdirectory, independent of
+``--input-dir`` — never a live run's filename).
 """
 from __future__ import annotations
 
@@ -216,8 +216,8 @@ def build_query_context(complexity_mode: bool):
     Simple mode collapses to the single static :class:`AllocationDecision`.
     """
     # Every re-decision here is an ablation, so concept-importance rankings are dropped from
-    # both the schema and the Ollama instruction (consistent with the live ablation path and
-    # the batch pipeline — never ask the model to rank a concept that may be removed).
+    # both the schema and the Ollama instruction (consistent with the live ablation path —
+    # never ask the model to rank a concept that may be removed).
     concept_keys = get_concept_keys(complexity_mode)
     return {
         "concept_keys": concept_keys,
@@ -406,9 +406,10 @@ def main():
 
     ctx = build_query_context(complexity_mode)
 
-    # Output path — a dedicated subdir, never a live run's filename. Resolved up front so the
-    # resumable checkpoint can live beside it.
-    out_dir = os.path.join(input_dir, "ablation")
+    # Output path — always resllm/output/ablation/, independent of where the prompts were read
+    # from (--input-dir). A dedicated subdir, never a live run's filename. Resolved up front so
+    # the resumable checkpoint can live beside it.
+    out_dir = os.path.join(_HERE, "output", "ablation")
     if args.output:
         out_path = os.path.abspath(args.output)
         out_dir = os.path.dirname(out_path)
