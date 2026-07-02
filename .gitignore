@@ -3,9 +3,7 @@ _scratch/
 _archive/
 archive/
 output/
-analysis/
-analysis_paper/
-analysis_paper_v2/
+analysis*/
 arnold_et_al_2026/
 *_local*
 *sublime*

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
+import time
 from typing import TypedDict
 
 import pandas as pd
@@ -406,10 +408,25 @@ class BaseReservoirOperator:
 # =============================================================================
 
 _MAX_RETRIES = 10
+_BACKOFF_BASE = 2.0          # seconds; doubled each attempt
+_BACKOFF_CAP = 30.0          # ceiling on a single backoff sleep
+_RATE_LIMIT_MIN_WAIT = 10.0  # floor wait on an HTTP 429 so the limit window can clear
+
+
+def _is_rate_limit(err: Exception) -> bool:
+    """Heuristic: does this exception look like an HTTP 429 / rate-limit response?"""
+    s = str(err).lower()
+    return "429" in s or "too many requests" in s or "rate limit" in s
 
 
 def _with_retries(fn, *, label: str):
-    """Call *fn* with up to ``_MAX_RETRIES`` attempts."""
+    """Call *fn* with up to ``_MAX_RETRIES`` attempts, backing off between failures.
+
+    Sleeps an exponential, fully jittered interval between attempts so a transient
+    error self-heals instead of burning every retry instantly. Failures that look
+    like a rate limit (HTTP 429) wait at least ``_RATE_LIMIT_MIN_WAIT`` so the
+    provider's limit window has time to clear before the next attempt.
+    """
     last_err: Exception | None = None
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
@@ -417,6 +434,13 @@ def _with_retries(fn, *, label: str):
         except Exception as e:
             last_err = e
             print(f"    ⚠  {label} attempt {attempt}/{_MAX_RETRIES} failed: {e}")
+            if attempt == _MAX_RETRIES:
+                break
+            ceiling = min(_BACKOFF_CAP, _BACKOFF_BASE * (2 ** (attempt - 1)))
+            delay = random.uniform(0, ceiling)  # full jitter
+            if _is_rate_limit(e):
+                delay = max(delay, _RATE_LIMIT_MIN_WAIT)
+            time.sleep(delay)
     raise RuntimeError(
         f"{label} API call failed after {_MAX_RETRIES} attempts: {last_err}"
     ) from last_err
