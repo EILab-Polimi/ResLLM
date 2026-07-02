@@ -348,6 +348,11 @@ def parse_args():
                    help="Rewrite the output CSV snapshot every N completed re-decisions so "
                         "progress is inspectable mid-run (0 disables; default: 100). The "
                         "durable record is the per-row .partial.jsonl checkpoint regardless.")
+    p.add_argument("--abort-after", type=int, default=10,
+                   help="Stop the whole run after this many CONSECUTIVE re-decisions fail "
+                        "(after their own backoff+retries) — a circuit breaker for a sustained "
+                        "rate limit / quota. The checkpoint is preserved, so re-running the same "
+                        "command resumes. 0 disables (default: 10).")
     p.add_argument("--output", default=None,
                    help="Output CSV path. Default: output/ablation/<prefix>_redecision_abl-"
                         "<types>_month-<months>.csv. Never written under a live run's filename.")
@@ -444,6 +449,8 @@ def main():
     results: list[dict] = list(done_ok.values())
     done = 0
     n_pending = len(pending)
+    consec_err = 0          # consecutive post-backoff failures (circuit breaker)
+    aborted = False
     ckpt_fh = open(ckpt_path, "a", buffering=1)  # line-buffered append, durable per row
     try:
         with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
@@ -456,17 +463,29 @@ def main():
                 ): (row, ablation_type)
                 for row, ablation_type in pending
             }
-            for fut in as_completed(futures):
-                res = fut.result()
-                results.append(res)
-                ckpt_fh.write(json.dumps(res, default=_json_default) + "\n")
-                ckpt_fh.flush()
-                done += 1
-                if done % 10 == 0 or done == n_pending:
-                    n_err = sum(1 for r in results if r.get("error"))
-                    print(f"  [{done}/{n_pending}] complete  ({n_err} errors so far)")
-                if args.flush_every and done % args.flush_every == 0:
-                    _finalize_df(results).to_csv(out_path, index=False)  # progress snapshot
+            try:
+                for fut in as_completed(futures):
+                    res = fut.result()
+                    results.append(res)
+                    ckpt_fh.write(json.dumps(res, default=_json_default) + "\n")
+                    ckpt_fh.flush()
+                    done += 1
+                    consec_err = consec_err + 1 if res.get("error") else 0
+                    if done % 10 == 0 or done == n_pending:
+                        n_err = sum(1 for r in results if r.get("error"))
+                        print(f"  [{done}/{n_pending}] complete  ({n_err} errors so far)")
+                    if args.flush_every and done % args.flush_every == 0:
+                        _finalize_df(results).to_csv(out_path, index=False)  # progress snapshot
+                    if args.abort_after and consec_err >= args.abort_after:
+                        aborted = True
+                        print(f"\n⛔ Circuit breaker: {consec_err} consecutive failures after "
+                              f"backoff — likely a sustained rate limit / quota. Stopping. "
+                              f"The checkpoint is preserved; re-run the same command to resume.")
+                        break
+            finally:
+                # Drop queued work immediately on abort/exit; in-flight calls finish on their
+                # own and are simply re-done on the next resume (they were never checkpointed).
+                ex.shutdown(wait=False, cancel_futures=True)
     finally:
         ckpt_fh.close()
 
@@ -476,6 +495,8 @@ def main():
     print(f"\nWrote {len(df)} re-decisions -> {out_path}")
     print(f"Checkpoint: {ckpt_path}  (re-run the same command to resume; --fresh to start over)")
     _summary(df, complexity_mode)
+    if aborted:
+        sys.exit(2)  # distinct code so a resume wrapper / notification can tell it tripped
 
 
 def _summary(df: pd.DataFrame, complexity_mode: bool) -> None:
